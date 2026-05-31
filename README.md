@@ -379,6 +379,8 @@ Legacy string entries are still accepted and treated as `model`-only config.
 | `/sdd-init`                      | Initializes or refreshes `openspec/config.yaml`.                    |
 | `/gentle-ai:install-sdd`         | Repairs missing global SDD runtime assets without overwriting files. |
 | `/gentle-ai:install-sdd --force` | Force-refreshes installed global SDD assets.                         |
+
+Package-owned global SDD runtime assets are also refreshed automatically on session start when `gentle-pi` changes. Project-local `.pi/agents` and `.pi/chains` remain manual overrides and are never overwritten by startup refresh.
 | `/skill-registry:refresh`        | Regenerates `.atl/skill-registry.md`.                               |
 
 Startup flag:

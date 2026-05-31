@@ -1455,7 +1455,7 @@ export default function gentleAi(pi: ExtensionAPI): void {
 
 	pi.on("session_start", async (_event, ctx) => {
 		try {
-			const installResult = installSddAssets(ctx.cwd, false);
+			const installResult = installSddAssets(ctx.cwd, true);
 			const modelResult = await applySavedModelConfig(ctx);
 			if (ctx.hasUI && modelResult.invalidPath) {
 				ctx.ui.notify(

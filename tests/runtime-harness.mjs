@@ -277,6 +277,28 @@ async function run() {
 		);
 		assert.equal(existsSync(join(globalAgentHome, "agents", "sdd-apply.md")), true);
 		assert.equal(existsSync(join(globalAgentHome, "chains", "sdd-full.chain.md")), true);
+		await writeFile(join(globalAgentHome, "agents", "sdd-apply.md"), "stale global apply\n");
+		await writeFile(join(globalAgentHome, "chains", "sdd-full.chain.md"), "stale global chain\n");
+		await mkdir(join(noUiCwd, ".pi", "agents"), { recursive: true });
+		await writeFile(join(noUiCwd, ".pi", "agents", "sdd-apply.md"), "project override must stay\n");
+		for (const handler of hooks.get("session_start")) {
+			await handler({ reason: "startup" }, createCtx(noUiCwd, false));
+		}
+		assert.notEqual(
+			await readFile(join(globalAgentHome, "agents", "sdd-apply.md"), "utf8"),
+			"stale global apply\n",
+			"session_start must refresh stale global SDD agents",
+		);
+		assert.notEqual(
+			await readFile(join(globalAgentHome, "chains", "sdd-full.chain.md"), "utf8"),
+			"stale global chain\n",
+			"session_start must refresh stale global SDD chains",
+		);
+		assert.equal(
+			await readFile(join(noUiCwd, ".pi", "agents", "sdd-apply.md"), "utf8"),
+			"project override must stay\n",
+			"session_start must not overwrite project-local SDD overrides",
+		);
 	} finally {
 		await rm(noUiCwd, { recursive: true, force: true });
 	}
