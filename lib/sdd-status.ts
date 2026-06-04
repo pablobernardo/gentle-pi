@@ -171,10 +171,20 @@ function countTasks(tasksPath: string | undefined): SddTaskProgress {
 	};
 }
 
-function reportIsClean(path: string | undefined): boolean {
+function reportIsClearlyPassing(path: string | undefined): boolean {
 	if (!path || !hasContent(path)) return false;
 	const text = safeRead(path);
-	return !/(^|\b)(FAIL|BLOCKED|CRITICAL)(\b|:)|verification blockers?/i.test(text);
+	const hasBlocker = /(^|\b)(FAIL|FAILED|BLOCKED|CRITICAL|PENDING|TODO)(\b|:)|verification blockers?|not\s+(?:pass|passed|passing|successful|complete|completed)|(?:pass|passed|success|successful|complete|completed)\s*:\s*no\b/i.test(text);
+	const hasPassSignal = text
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.some((line) =>
+			/^(?:(?:status|verdict|result|verification|sync|final(?:\s+verdict)?)\s*:\s*)?(?:PASS|PASSED|SUCCESS|SUCCESSFUL)$/i.test(line) ||
+			/^all checks passed\.?$/i.test(line) ||
+			/^ready for archive\.?$/i.test(line) ||
+			/^sync completed?\.?$/i.test(line),
+		);
+	return hasPassSignal && !hasBlocker;
 }
 
 function emptyStatus(cwd: string, changeName: string | null, blockedReasons: string[]): SddStatus {
@@ -302,7 +312,7 @@ export function resolveSddStatus(options: ResolveSddStatusOptions): SddStatus {
 	const syncReport = join(changeRoot, "sync-report.md");
 	const specFiles = findSpecFiles(join(changeRoot, "specs"));
 	const legacyFlatSpec = detectLegacyFlatSpec(root, changeName);
-	const flatOnly = Boolean(legacyFlatSpec && !legacyFlatSpec.hasDomainSpecs);
+	const flatOnly = Boolean(legacyFlatSpec && specFiles.length === 0);
 
 	const artifactPaths: SddArtifactPaths = {
 		proposal: existsSync(proposal) ? [proposal] : [],
@@ -335,41 +345,50 @@ export function resolveSddStatus(options: ResolveSddStatusOptions): SddStatus {
 		.filter((domain): domain is string => Boolean(domain))
 		.map((domain) => ({
 			domain,
-			changes: detectActiveDomainCollisions(root, changeName, domain),
+			changes: detectActiveDomainCollisions(root, changeName, domain).sort((a, b) =>
+				a.change.localeCompare(b.change),
+			),
 		}))
 		.filter((collision) => collision.changes.length > 0);
 
 	if (artifacts.proposal === "missing") blockedReasons.push("proposal.md is missing.");
+	if (artifacts.proposal === "partial") blockedReasons.push("proposal.md is empty or partial.");
 	if (artifacts.specs !== "done") blockedReasons.push("domain specs are missing or partial.");
 	if (artifacts.design === "missing") blockedReasons.push("design.md is missing.");
+	if (artifacts.design === "partial") blockedReasons.push("design.md is empty or partial.");
 	if (artifacts.tasks === "missing") blockedReasons.push("tasks.md is missing.");
+	if (artifacts.tasks === "partial") blockedReasons.push("tasks.md is empty or partial.");
+	if (artifacts.tasks === "done" && taskProgress.total === 0) {
+		blockedReasons.push("tasks.md has no implementation task checkboxes.");
+	}
 	if (flatOnly && legacyFlatSpec) {
 		blockedReasons.push(`Legacy flat spec is present without domain specs: ${legacyFlatSpec.path}.`);
 	}
 
-	const applyReady = artifacts.specs === "done" && artifacts.design === "done" && artifacts.tasks === "done";
-	const applyState: ApplyState = !applyReady
+	const coreArtifactsReady = artifacts.proposal === "done" && artifacts.specs === "done" && artifacts.design === "done" && artifacts.tasks === "done" && taskProgress.total > 0 && !flatOnly;
+	const applyState: ApplyState = !coreArtifactsReady
 		? "blocked"
-		: taskProgress.total > 0 && taskProgress.remaining === 0
+		: taskProgress.remaining === 0
 			? "all_done"
 			: "ready";
-	const verifyClean = reportIsClean(artifactPaths.verifyReport[0]);
-	const syncClean = reportIsClean(artifactPaths.syncReport[0]);
-	const syncState: DependencyState = syncClean
-		? "all_done"
-		: verifyClean && collisions.length === 0 && !flatOnly
-			? "ready"
-			: "blocked";
+	const verifyClean = reportIsClearlyPassing(artifactPaths.verifyReport[0]);
+	const syncClean = reportIsClearlyPassing(artifactPaths.syncReport[0]);
+	const syncPrerequisitesReady = coreArtifactsReady && verifyClean && collisions.length === 0 && !flatOnly;
+	const syncState: DependencyState = syncPrerequisitesReady
+		? syncClean
+			? "all_done"
+			: "ready"
+		: "blocked";
 	const verifyState: DependencyState = verifyClean
 		? "all_done"
-		: artifacts.tasks === "done" && (artifacts.applyProgress === "done" || applyState === "all_done")
+		: artifacts.tasks === "done" && taskProgress.total > 0 && (artifacts.applyProgress === "done" || applyState === "all_done")
 			? "ready"
 			: "blocked";
 	const dependencies: SddStatus["dependencies"] = {
 		apply: applyState === "blocked" ? "blocked" : applyState,
 		verify: verifyState,
 		sync: syncState,
-		archive: verifyClean && syncClean && taskProgress.remaining === 0 ? "ready" : "blocked",
+		archive: coreArtifactsReady && verifyClean && syncClean && taskProgress.remaining === 0 ? "ready" : "blocked",
 	};
 	const archiveReady = dependencies.archive === "ready";
 	const nextRecommended = dependencies.apply === "ready"
@@ -405,13 +424,54 @@ export function resolveSddStatus(options: ResolveSddStatusOptions): SddStatus {
 		},
 		collisions,
 		legacyFlatSpec: legacyFlatSpec
-			? { path: legacyFlatSpec.path, hasDomainSpecs: legacyFlatSpec.hasDomainSpecs }
+			? { path: legacyFlatSpec.path, hasDomainSpecs: specFiles.length > 0 }
 			: undefined,
 		nextRecommended,
 		blockedReasons,
 	};
 	if (options.includeInstructions) status.instructions = renderPhaseInstructions(status);
 	return status;
+}
+
+export function renderNativeSddPhasePrompt(status: SddStatus, phase?: SddPhase): string {
+	const selectedInstructions = phase ? status.instructions?.[phase] : undefined;
+	return [
+		"## Native SDD Status Engine",
+		"The parent/orchestrator resolved this status deterministically. Treat it as authoritative over prompt inference.",
+		"Do not run phase work when this status marks the phase blocked; return the blockers instead.",
+		...(phase && selectedInstructions
+			? ["", `### ${phase} instructions`, ...selectedInstructions.map((line) => `- ${line}`)]
+			: []),
+		"",
+		"```json",
+		JSON.stringify(status, null, 2),
+		"```",
+	].join("\n");
+}
+
+export function renderSddDispatcherMarkdown(status: SddStatus): string {
+	return [
+		`## Native SDD Dispatcher: ${status.changeName ?? "unresolved"}`,
+		"",
+		`nextPhase: ${status.nextRecommended}`,
+		`apply: ${status.dependencies.apply}`,
+		`verify: ${status.dependencies.verify}`,
+		`sync: ${status.dependencies.sync}`,
+		`archive: ${status.dependencies.archive}`,
+		"",
+		status.blockedReasons.length > 0
+			? ["### Blocked", ...status.blockedReasons.map((reason) => `- ${reason}`)].join("\n")
+			: "### Ready\nThe next phase may be delegated with the attached status JSON and phase instructions.",
+		"",
+		"### Instructions for next phase",
+		...((status.instructions?.[status.nextRecommended.replace(/^sdd-/, "") as SddPhase] ?? [])
+			.map((line) => `- ${line}`)),
+		"",
+		"### Status JSON",
+		"```json",
+		JSON.stringify(status, null, 2),
+		"```",
+	].join("\n");
 }
 
 export function renderSddStatusMarkdown(status: SddStatus): string {

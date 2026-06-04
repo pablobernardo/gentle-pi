@@ -31,9 +31,12 @@ import {
 } from "../lib/sdd-preflight.ts";
 import {
 	parseSddStatusCommandArgs,
+	renderNativeSddPhasePrompt,
+	renderSddDispatcherMarkdown,
 	renderSddStatusMarkdown,
 	resolveSddStatus,
 	sddStatusSeverity,
+	type SddPhase,
 } from "../lib/sdd-status.ts";
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -309,6 +312,21 @@ function readAgentStartNames(event: unknown): string[] {
 
 function isNamedAgentStartEvent(event: unknown): boolean {
 	return readAgentStartNames(event).length > 0;
+}
+
+function sddPhaseFromAgentStartEvent(event: unknown): SddPhase | undefined {
+	for (const name of readAgentStartNames(event)) {
+		if (name === "sdd-apply") return "apply";
+		if (name === "sdd-verify") return "verify";
+		if (name === "sdd-sync") return "sync";
+		if (name === "sdd-archive") return "archive";
+	}
+	const systemPrompt = readStringPath(event, ["systemPrompt"]) ?? "";
+	if (/\bSDD apply executor\b/i.test(systemPrompt)) return "apply";
+	if (/\bSDD verify executor\b/i.test(systemPrompt)) return "verify";
+	if (/\bSDD sync executor\b/i.test(systemPrompt)) return "sync";
+	if (/\bSDD archive executor\b/i.test(systemPrompt)) return "archive";
+	return undefined;
 }
 
 function evaluateDeniedCommand(
@@ -1614,11 +1632,18 @@ export default function gentleAi(pi: ExtensionAPI): void {
 			prefs && (!isNamedAgent || isSddAgent)
 				? `\n\n${renderSddPreflightPrompt(prefs)}`
 				: "";
+		const phase = isSddAgent ? sddPhaseFromAgentStartEvent(event) : undefined;
+		const nativeStatusPrompt = phase
+			? `\n\n${renderNativeSddPhasePrompt(resolveSddStatus({
+				cwd: ctx.cwd,
+				includeInstructions: true,
+			}), phase)}`
+			: "";
 		const gentlePrompt = isNamedAgent || isSddAgent
 			? ""
 			: `\n\n${buildGentlePrompt(readPersonaMode(ctx.cwd))}`;
 		return {
-			systemPrompt: `${event.systemPrompt}${gentlePrompt}${sddPrompt}`,
+			systemPrompt: `${event.systemPrompt}${gentlePrompt}${sddPrompt}${nativeStatusPrompt}`,
 		};
 	});
 
@@ -1686,6 +1711,33 @@ export default function gentleAi(pi: ExtensionAPI): void {
 		description: "Compatibility alias for /sdd-status.",
 		handler: async (args, ctx) => {
 			handleSddStatusCommand(args, ctx);
+		},
+	});
+
+	const handleSddContinueCommand = (args: string, ctx: ExtensionContext) => {
+		const parsed = parseSddStatusCommandArgs(args);
+		const status = resolveSddStatus({
+			cwd: ctx.cwd,
+			changeName: parsed.changeName,
+			includeInstructions: true,
+		});
+		ctx.ui.notify(
+			parsed.json ? JSON.stringify(status, null, 2) : renderSddDispatcherMarkdown(status),
+			sddStatusSeverity(status),
+		);
+	};
+
+	pi.registerCommand("sdd-continue", {
+		description: "Resolve SDD status and route the next phase deterministically.",
+		handler: async (args, ctx) => {
+			handleSddContinueCommand(args, ctx);
+		},
+	});
+
+	pi.registerCommand("gentle-ai:sdd-continue", {
+		description: "Compatibility alias for /sdd-continue.",
+		handler: async (args, ctx) => {
+			handleSddContinueCommand(args, ctx);
 		},
 	});
 

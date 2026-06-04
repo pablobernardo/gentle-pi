@@ -33,6 +33,8 @@ const EXPECTED_COMMANDS = [
 	"gentle:sdd-preflight",
 	"sdd-status",
 	"gentle-ai:sdd-status",
+	"sdd-continue",
+	"gentle-ai:sdd-continue",
 	"gentle:models",
 	"gentle-ai:models",
 	"gentleman:models",
@@ -248,6 +250,25 @@ async function run() {
 		assert.match(onboardPromptResult.systemPrompt, /onboard base/);
 		assert.match(onboardPromptResult.systemPrompt, /## SDD Session Preflight/);
 		assert.equal(existsSync(join(globalAgentHome, "agents", "sdd-onboard.md")), true);
+		await mkdir(join(promptCwd, "openspec", "changes", "status-demo", "specs", "demo"), { recursive: true });
+		await writeFile(join(promptCwd, "openspec", "changes", "status-demo", "proposal.md"), "# Proposal\n");
+		await writeFile(join(promptCwd, "openspec", "changes", "status-demo", "specs", "demo", "spec.md"), "# Spec\n");
+		await writeFile(join(promptCwd, "openspec", "changes", "status-demo", "design.md"), "# Design\n");
+		await writeFile(join(promptCwd, "openspec", "changes", "status-demo", "tasks.md"), "# Tasks\n\n- [ ] 1.1 Implement demo\n");
+		const applyPromptResult = await promptHook(
+			{ agentName: "sdd-apply", systemPrompt: "apply base" },
+			createCtx(promptCwd, true, "sdd-apply-session"),
+		);
+		assert.match(applyPromptResult.systemPrompt, /## Native SDD Status Engine/);
+		assert.match(applyPromptResult.systemPrompt, /"changeName": "status-demo"/);
+		assert.match(applyPromptResult.systemPrompt, /### apply instructions/);
+		const statusCtx = createCtx(promptCwd, true);
+		await commands.get("sdd-status").handler("status-demo --json", statusCtx);
+		assert.match(statusCtx.ui.notifications.at(-1).message, /"schemaName": "gentle-pi\.sdd-status"/);
+		const continueCtx = createCtx(promptCwd, true);
+		await commands.get("sdd-continue").handler("status-demo", continueCtx);
+		assert.match(continueCtx.ui.notifications.at(-1).message, /Native SDD Dispatcher/);
+		assert.match(continueCtx.ui.notifications.at(-1).message, /nextPhase: sdd-apply/);
 	} finally {
 		await rm(promptCwd, { recursive: true, force: true });
 	}

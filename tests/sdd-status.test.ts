@@ -101,6 +101,34 @@ test("resolveSddStatus marks apply all_done and verify ready when tasks are chec
 	assert.equal(status.dependencies.verify, "ready");
 });
 
+test("resolveSddStatus blocks sync when verify report is not clearly passing", async () => {
+	const cwd = await workspace();
+	const root = seedChange(cwd);
+	write(join(root, "apply-progress.md"), "# Apply\n\nSome work completed.\n");
+	write(join(root, "verify-report.md"), "# Verify\n\nTODO: tests not run yet\n");
+
+	const status = resolveSddStatus({ cwd, changeName: "add-auth" });
+
+	assert.equal(status.dependencies.verify, "ready");
+	assert.equal(status.dependencies.sync, "blocked");
+	assert.equal(status.dependencies.archive, "blocked");
+});
+
+test("resolveSddStatus rejects negated pass and sync-complete phrases", async () => {
+	const cwd = await workspace();
+	const root = seedChange(cwd);
+	write(join(root, "tasks.md"), "# Tasks\n\n- [x] 1.1 Done\n");
+	write(join(root, "verify-report.md"), "# Verify\n\nStatus: not passed\n");
+	write(join(root, "sync-report.md"), "# Sync\n\nSync complete: no\n");
+
+	const status = resolveSddStatus({ cwd, changeName: "add-auth" });
+
+	assert.equal(status.dependencies.verify, "ready");
+	assert.equal(status.dependencies.sync, "blocked");
+	assert.equal(status.dependencies.archive, "blocked");
+	assert.notEqual(status.nextRecommended, "sdd-archive");
+});
+
 test("resolveSddStatus blocks sync when verify report contains critical text", async () => {
 	const cwd = await workspace();
 	const root = seedChange(cwd);
@@ -126,6 +154,19 @@ test("resolveSddStatus reports same-domain collisions", async () => {
 	assert.equal(status.dependencies.sync, "blocked");
 });
 
+test("resolveSddStatus blocks apply when tasks has no checkboxes", async () => {
+	const cwd = await workspace();
+	const root = seedChange(cwd);
+	write(join(root, "tasks.md"), "# Tasks\n\nImplementation notes only.\n");
+
+	const status = resolveSddStatus({ cwd, changeName: "add-auth" });
+
+	assert.equal(status.taskProgress.total, 0);
+	assert.equal(status.applyState, "blocked");
+	assert.equal(status.dependencies.apply, "blocked");
+	assert.match(status.blockedReasons.join("\n"), /no implementation task checkboxes/);
+});
+
 test("resolveSddStatus marks legacy flat specs partial and blocks sync", async () => {
 	const cwd = await workspace();
 	write(join(cwd, "openspec", "changes", "legacy", "proposal.md"), "# Proposal\n");
@@ -139,6 +180,78 @@ test("resolveSddStatus marks legacy flat specs partial and blocks sync", async (
 	assert.equal(status.artifacts.specs, "partial");
 	assert.match(status.blockedReasons.join("\n"), /Legacy flat spec/);
 	assert.equal(status.dependencies.sync, "blocked");
+});
+
+test("resolveSddStatus accepts nested domain specs even when a legacy flat spec also exists", async () => {
+	const cwd = await workspace();
+	write(join(cwd, "openspec", "changes", "mixed", "proposal.md"), "# Proposal\n");
+	write(join(cwd, "openspec", "changes", "mixed", "spec.md"), "# Flat\n");
+	write(join(cwd, "openspec", "changes", "mixed", "specs", "parent", "child", "spec.md"), "# Nested\n");
+	write(join(cwd, "openspec", "changes", "mixed", "design.md"), "# Design\n");
+	write(join(cwd, "openspec", "changes", "mixed", "tasks.md"), "# Tasks\n\n- [x] 1.1 Done\n");
+
+	const status = resolveSddStatus({ cwd, changeName: "mixed" });
+
+	assert.equal(status.artifacts.specs, "done");
+	assert.equal(status.legacyFlatSpec?.hasDomainSpecs, true);
+	assert.doesNotMatch(status.blockedReasons.join("\n"), /Legacy flat spec/);
+});
+
+test("resolveSddStatus blocks sync when core artifacts are missing even with clean verify", async () => {
+	const cwd = await workspace();
+	write(join(cwd, "openspec", "changes", "thin", "proposal.md"), "# Proposal\n");
+	write(join(cwd, "openspec", "changes", "thin", "design.md"), "# Design\n");
+	write(join(cwd, "openspec", "changes", "thin", "tasks.md"), "# Tasks\n\n- [x] 1.1 Done\n");
+	write(join(cwd, "openspec", "changes", "thin", "verify-report.md"), "# Verify\n\nPASS\n");
+
+	const status = resolveSddStatus({ cwd, changeName: "thin" });
+
+	assert.match(status.blockedReasons.join("\n"), /domain specs are missing or partial/);
+	assert.equal(status.dependencies.sync, "blocked");
+	assert.notEqual(status.nextRecommended, "sdd-sync");
+});
+
+test("resolveSddStatus blocks stale sync report when current verify is not passing", async () => {
+	const cwd = await workspace();
+	const root = seedChange(cwd);
+	write(join(root, "tasks.md"), "# Tasks\n\n- [x] 1.1 Done\n");
+	write(join(root, "verify-report.md"), "# Verify\n\nStatus: not passed\n");
+	write(join(root, "sync-report.md"), "# Sync\n\nPASS\n");
+
+	const status = resolveSddStatus({ cwd, changeName: "add-auth" });
+
+	assert.equal(status.dependencies.verify, "ready");
+	assert.equal(status.dependencies.sync, "blocked");
+	assert.equal(status.dependencies.archive, "blocked");
+	assert.notEqual(status.nextRecommended, "sdd-archive");
+});
+
+test("resolveSddStatus blocks archive when required artifacts are missing", async () => {
+	const cwd = await workspace();
+	write(join(cwd, "openspec", "changes", "thin", "tasks.md"), "# Tasks\n\n- [x] 1.1 Done\n");
+	write(join(cwd, "openspec", "changes", "thin", "verify-report.md"), "# Verify\n\nPASS\n");
+	write(join(cwd, "openspec", "changes", "thin", "sync-report.md"), "# Sync\n\nPASS\n");
+
+	const status = resolveSddStatus({ cwd, changeName: "thin" });
+
+	assert.match(status.blockedReasons.join("\n"), /proposal\.md is missing/);
+	assert.equal(status.dependencies.archive, "blocked");
+	assert.notEqual(status.nextRecommended, "sdd-archive");
+});
+
+test("resolveSddStatus reports partial core artifacts as blockers", async () => {
+	const cwd = await workspace();
+	const root = seedChange(cwd);
+	write(join(root, "proposal.md"), "");
+	write(join(root, "tasks.md"), "# Tasks\n\n- [x] 1.1 Done\n");
+	write(join(root, "verify-report.md"), "# Verify\n\nPASS\n");
+	write(join(root, "sync-report.md"), "# Sync\n\nPASS\n");
+
+	const status = resolveSddStatus({ cwd, changeName: "add-auth" });
+
+	assert.equal(status.artifacts.proposal, "partial");
+	assert.match(status.blockedReasons.join("\n"), /proposal\.md is empty or partial/);
+	assert.equal(status.dependencies.archive, "blocked");
 });
 
 test("resolveSddStatus marks archive ready only after clean verify, sync, and complete tasks", async () => {

@@ -181,6 +181,24 @@ proposal → design ┘
 
 `/sdd-status [change]` is the read-only status action for resolving the active change, artifact paths, task progress, dependency readiness, and action context before apply/verify/sync/archive.
 
+## Native SDD Dispatcher
+
+The user expresses intent; they should not have to administer phases manually. For natural-language SDD requests and `/sdd-continue`, the parent/orchestrator must use the native status engine as the state authority, decide the next phase, and delegate only the phase that status marks ready.
+
+Flow:
+
+```text
+user intent → preflight/init guard → native status engine → phase decision → subagent gets status JSON + generated instructions → artifact/progress write → status recalculation → continue or stop
+```
+
+Rules:
+
+- `/sdd-status` is a debug/status command, not the main UX.
+- `/sdd-continue` is the native dispatcher command: resolve status, choose the next ready phase, and carry status/instructions into the subagent prompt.
+- `sdd-apply`, `sdd-verify`, `sdd-sync`, and `sdd-archive` must obey parent-provided native status; they must not reconstruct readiness from prompt inference when status JSON is present.
+- Do not launch a phase when native status marks that dependency `blocked`.
+- `sdd-archive` cannot proceed unless native status says archive is ready.
+
 ## SDD Status Contract
 
 Before `/sdd-continue`, `sdd-apply`, `sdd-verify`, `sdd-sync`, or `sdd-archive`, resolve and carry structured status. Lookup order: parent-provided status, then project override `.pi/gentle-ai/support/sdd-status-contract.md`, then globally installed `~/.pi/agent/gentle-ai/support/sdd-status-contract.md`, then the embedded `sdd-status` prompt contract. Do not use `assets/support/...` as a runtime path; that is only the package source path before installation.
