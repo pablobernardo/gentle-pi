@@ -11,7 +11,6 @@ import {
 	mkdir,
 	readFile,
 	readdir,
-	unlink,
 	writeFile,
 } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -46,6 +45,19 @@ import {
 	type ChangedDiff,
 	type TriggerEvent,
 } from "../lib/review-triggers.ts";
+import {
+	MODEL_EXPORT_KIND,
+	MODEL_EXPORT_VERSION,
+	deleteModelProfile,
+	listModelProfiles,
+	modelProfilesDir,
+	normalizeModelConfig,
+	parseModelExport,
+	readModelProfile,
+	safeModelProfileFilename,
+	writeModelProfile,
+	writeModelProfileFile,
+} from "../lib/model-profiles.ts";
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const ASSETS_DIR = join(PACKAGE_ROOT, "assets");
@@ -658,93 +670,6 @@ function modelExportPath(_cwd: string): string {
 	return join(gentleAiConfigHome(), "models.export.json");
 }
 
-const MODEL_EXPORT_KIND = "gentle-pi.agent_model_routing";
-const MODEL_EXPORT_VERSION = 1;
-
-function modelProfilesDir(_cwd?: string): string {
-	return join(gentleAiConfigHome(), "model-profiles");
-}
-
-const MODEL_PROFILE_FILENAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
-const MAX_MODEL_PROFILE_FILENAME_LENGTH = 64;
-
-function safeModelProfileFilename(name: string): string | undefined {
-	const trimmed = name.trim();
-	if (trimmed.length === 0) return undefined;
-	const segments = trimmed
-		.toLowerCase()
-		.split(/[\\/]+/)
-		.map((segment) =>
-			segment.replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, ""),
-		)
-		.filter((segment) => segment.length > 0);
-	if (segments.length === 0) return undefined;
-	const basename = segments
-		.join("-")
-		.slice(0, MAX_MODEL_PROFILE_FILENAME_LENGTH);
-	if (!MODEL_PROFILE_FILENAME_PATTERN.test(basename)) return undefined;
-	return `${basename}.json`;
-}
-
-function isSafeModelProfileFilename(filename: string): boolean {
-	if (!filename.endsWith(".json")) return false;
-	return MODEL_PROFILE_FILENAME_PATTERN.test(filename.slice(0, -5));
-}
-
-interface ModelProfileEntry { filename: string; path: string; }
-
-async function listModelProfiles(): Promise<ModelProfileEntry[]> {
-	const dir = modelProfilesDir();
-	if (!existsSync(dir)) return [];
-	const entries = await readdir(dir, { withFileTypes: true });
-	const profiles: ModelProfileEntry[] = [];
-	for (const entry of entries) {
-		if (!entry.isFile() || !isSafeModelProfileFilename(entry.name)) continue;
-		profiles.push({ filename: entry.name, path: join(dir, entry.name) });
-	}
-	profiles.sort((left, right) => left.filename.localeCompare(right.filename));
-	return profiles;
-}
-
-function buildModelProfileEnvelope(agents: AgentModelConfig): string {
-	const cleaned = normalizeModelConfig(agents) ?? {};
-	return JSON.stringify(
-		{ kind: MODEL_EXPORT_KIND, version: MODEL_EXPORT_VERSION, agents: cleaned },
-		null,
-		2,
-	);
-}
-
-async function writeModelProfileFile(path: string, agents: AgentModelConfig): Promise<void> {
-	await mkdir(dirname(path), { recursive: true });
-	await writeFile(path, `${buildModelProfileEnvelope(agents)}\n`);
-}
-
-async function writeModelProfile(name: string,agents: AgentModelConfig): Promise<string> {
-	const filename = safeModelProfileFilename(name);
-	if (!filename) throw new Error(`Invalid profile name: ${name}`);
-	const path = join(modelProfilesDir(), filename);
-	await writeModelProfileFile(path, agents);
-	return path;
-}
-
-async function readModelProfile(filename: string): Promise<AgentModelConfig | undefined> {
-	if (!isSafeModelProfileFilename(filename)) return undefined;
-	const path = join(modelProfilesDir(), filename);
-	if (!existsSync(path)) return undefined;
-	try {
-		return parseModelExport(JSON.parse(await readFile(path, "utf8")));
-	} catch {
-		return undefined;
-	}
-}
-
-async function deleteModelProfile(filename: string): Promise<void> {
-	if (!isSafeModelProfileFilename(filename)) return;
-	const path = join(modelProfilesDir(), filename);
-	if (existsSync(path)) await unlink(path);
-}
-
 function legacyProjectModelConfigPath(cwd: string): string {
 	return join(cwd, ".pi", "gentle-ai", "models.json");
 }
@@ -895,17 +820,6 @@ export async function readModelConfigAsync(
 	return result.status === "valid" ? result.config : {};
 }
 
-function normalizeModelConfig(value: unknown): AgentModelConfig | undefined {
-	if (!isRecord(value)) return undefined;
-	const cleaned: AgentModelConfig = {};
-	for (const [name, entryValue] of Object.entries(value)) {
-		if (!/^[A-Za-z0-9._:@/+%-]+$/.test(name)) continue;
-		const entry = normalizeRoutingEntry(entryValue);
-		if (entry) cleaned[name] = entry;
-	}
-	return cleaned;
-}
-
 function writeModelConfig(cwd: string, config: AgentModelConfig): void {
 	const path = modelConfigPath(cwd);
 	mkdirSync(dirname(path), { recursive: true });
@@ -918,12 +832,6 @@ async function writeModelConfigAsync(cwd: string, config: AgentModelConfig): Pro
 	await mkdir(dirname(path), { recursive: true });
 	const cleaned = normalizeModelConfig(config) ?? {};
 	await writeFile(path, `${JSON.stringify(cleaned, null, 2)}\n`);
-}
-
-function parseModelExport(value: unknown): AgentModelConfig | undefined {
-	if (!isRecord(value)) return undefined;
-	if (value.kind !== MODEL_EXPORT_KIND || value.version !== MODEL_EXPORT_VERSION) return undefined;
-	return normalizeModelConfig(value.agents);
 }
 
 async function exportSavedModelConfig(ctx: ExtensionContext): Promise<number> {
@@ -2212,14 +2120,6 @@ export const __testing = {
 	buildGentlePrompt,
 	classifyReviewEvent,
 	parseNumstat,
-	modelProfiles: {
-		modelProfilesDir,
-		safeModelProfileFilename,
-		listModelProfiles,
-		writeModelProfile,
-		readModelProfile,
-		deleteModelProfile,
-	},
 };
 
 export default function gentleAi(pi: ExtensionAPI): void {
