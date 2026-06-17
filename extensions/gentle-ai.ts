@@ -438,7 +438,18 @@ const SDD_AGENT_NAMES = [
 ] as const;
 const SDD_AGENT_NAME_SET = new Set<string>(SDD_AGENT_NAMES);
 
-type SddAgentName = (typeof SDD_AGENT_NAMES)[number];
+const JUDGMENT_DAY_AGENT_NAMES = [
+	"jd-judge-a",
+	"jd-judge-b",
+	"jd-fix-agent",
+] as const;
+
+const CORE_MODEL_AGENT_NAMES = [
+	...SDD_AGENT_NAMES,
+	...JUDGMENT_DAY_AGENT_NAMES,
+] as const;
+const CORE_MODEL_AGENT_NAME_SET = new Set<string>(CORE_MODEL_AGENT_NAMES);
+
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 interface AgentRoutingEntry {
 	model?: string;
@@ -998,14 +1009,7 @@ function listDiscoverableAgents(cwd: string): AgentEntry[] {
 	];
 	const byName = new Map<string, AgentEntry>();
 	for (const agent of agents) byName.set(agent.name, agent);
-	const discovered = Array.from(byName.values());
-	const sddFirst = SDD_AGENT_NAMES.map((name) =>
-		discovered.find((agent) => agent.name === name),
-	).filter((agent): agent is AgentEntry => agent !== undefined);
-	const rest = discovered
-		.filter((agent) => !SDD_AGENT_NAMES.includes(agent.name as SddAgentName))
-		.sort((left, right) => left.name.localeCompare(right.name));
-	return [...sddFirst, ...rest];
+	return orderDiscoverableAgents(Array.from(byName.values()));
 }
 
 async function listDiscoverableAgentsAsync(cwd: string): Promise<AgentEntry[]> {
@@ -1030,14 +1034,17 @@ async function listDiscoverableAgentsAsync(cwd: string): Promise<AgentEntry[]> {
 	}
 	const byName = new Map<string, AgentEntry>();
 	for (const agent of agents) byName.set(agent.name, agent);
-	const discovered = Array.from(byName.values());
-	const sddFirst = SDD_AGENT_NAMES.map((name) =>
-		discovered.find((agent) => agent.name === name),
+	return orderDiscoverableAgents(Array.from(byName.values()));
+}
+
+function orderDiscoverableAgents(agents: AgentEntry[]): AgentEntry[] {
+	const coreFirst = CORE_MODEL_AGENT_NAMES.map((name) =>
+		agents.find((agent) => agent.name === name),
 	).filter((agent): agent is AgentEntry => agent !== undefined);
-	const rest = discovered
-		.filter((agent) => !SDD_AGENT_NAMES.includes(agent.name as SddAgentName))
+	const rest = agents
+		.filter((agent) => !CORE_MODEL_AGENT_NAME_SET.has(agent.name))
 		.sort((left, right) => left.name.localeCompare(right.name));
-	return [...sddFirst, ...rest];
+	return [...coreFirst, ...rest];
 }
 
 function projectSettingsPath(cwd: string): string {
@@ -1904,6 +1911,8 @@ async function applyReviewGate(
 export const __testing = {
 	listAgentsFromDir,
 	listAgentsFromDirAsync,
+	listDiscoverableAgents,
+	orderDiscoverableAgents,
 	classifyGuardedCommand,
 	loadRuntimeGuardrailsConfig,
 	buildGentlePrompt,

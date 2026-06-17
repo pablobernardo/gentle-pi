@@ -34,3 +34,52 @@ test("agent discovery skips skills directories", async (t) => {
 		["reviewer", "worker"],
 	);
 });
+
+test("agent model discovery prioritizes SDD and Judgment Day agents", (t) => {
+	const root = mkdtempSync(join(tmpdir(), "gentle-pi-model-agents-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	writeMarkdown(join(root, "zeta.md"), "name: zeta\n");
+	writeMarkdown(join(root, "jd-fix-agent.md"), "name: jd-fix-agent\n");
+	writeMarkdown(join(root, "sdd-apply.md"), "name: sdd-apply\n");
+	writeMarkdown(join(root, "alpha.md"), "name: alpha\n");
+	writeMarkdown(join(root, "jd-judge-b.md"), "name: jd-judge-b\n");
+	writeMarkdown(join(root, "sdd-init.md"), "name: sdd-init\n");
+	writeMarkdown(join(root, "jd-judge-a.md"), "name: jd-judge-a\n");
+
+	const discovered = __testing.listAgentsFromDir(root, "user");
+	const ordered = __testing.orderDiscoverableAgents(discovered);
+
+	assert.deepEqual(
+		ordered.map((agent) => agent.name),
+		[
+			"sdd-init",
+			"sdd-apply",
+			"jd-judge-a",
+			"jd-judge-b",
+			"jd-fix-agent",
+			"alpha",
+			"zeta",
+		],
+	);
+});
+
+test("discoverable model agents include installed Judgment Day agents", (t) => {
+	const root = mkdtempSync(join(tmpdir(), "gentle-pi-installed-agents-"));
+	const previousHome = process.env.GENTLE_PI_AGENT_HOME;
+	process.env.GENTLE_PI_AGENT_HOME = root;
+	t.after(() => {
+		if (previousHome === undefined) delete process.env.GENTLE_PI_AGENT_HOME;
+		else process.env.GENTLE_PI_AGENT_HOME = previousHome;
+		rmSync(root, { recursive: true, force: true });
+	});
+	writeMarkdown(join(root, "agents", "jd-judge-a.md"), "name: jd-judge-a\n");
+	writeMarkdown(join(root, "agents", "jd-judge-b.md"), "name: jd-judge-b\n");
+	writeMarkdown(join(root, "agents", "jd-fix-agent.md"), "name: jd-fix-agent\n");
+
+	const discovered = __testing.listDiscoverableAgents(root).map((agent) => agent.name);
+
+	assert.deepEqual(
+		discovered.filter((name) => name.startsWith("jd-")),
+		["jd-judge-a", "jd-judge-b", "jd-fix-agent"],
+	);
+});
