@@ -1223,15 +1223,21 @@ interface OverlayComponent {
 type ModelPanelResult =
 	| { type: "save"; config: AgentModelConfig }
 	| { type: "custom"; agent: string | "all"; config: AgentModelConfig }
-	| { type: "profile-save"; config: AgentModelConfig }
-	| { type: "profile-load"; config: AgentModelConfig }
-	| { type: "profile-overwrite"; config: AgentModelConfig }
-	| { type: "profile-delete"; config: AgentModelConfig }
+	| { type: "profile-save"; name: string; config: AgentModelConfig }
+	| { type: "profile-load"; filename: string; config: AgentModelConfig }
+	| { type: "profile-overwrite"; filename: string; config: AgentModelConfig }
+	| { type: "profile-delete"; filename: string; config: AgentModelConfig }
 	| { type: "export"; config: AgentModelConfig }
 	| { type: "restore"; config: AgentModelConfig }
 	| { type: "cancel" };
 
 const SET_ALL_AGENTS = "Set all agents";
+
+type ProfilePrompt =
+	| "picker"
+	| "save-name"
+	| "overwrite-confirm"
+	| "delete-confirm";
 
 class SddModelPanel implements OverlayComponent {
 	private cursor = 0;
@@ -1240,6 +1246,9 @@ class SddModelPanel implements OverlayComponent {
 	private modelCursor = 0;
 	private effortCursor = 0;
 	private query = "";
+	private profileCursor = 0;
+	private profilePrompt: ProfilePrompt = "picker";
+	private profileNameBuffer = "";
 	private readonly draft: AgentModelConfig;
 	private readonly rows: string[];
 	private readonly modelOptions: string[];
@@ -1251,12 +1260,14 @@ class SddModelPanel implements OverlayComponent {
 		modelOptions: string[],
 		agents: string[],
 		profileNames: string[],
+		initialMode: "agents" | "profiles",
 		done: (result: ModelPanelResult) => void,
 	) {
 		this.draft = cloneModelConfig(initialConfig);
 		this.rows = [SET_ALL_AGENTS, ...agents];
 		this.modelOptions = modelOptions;
 		this.profileNames = profileNames;
+		this.mode = initialMode;
 		this.done = done;
 	}
 
@@ -1491,24 +1502,143 @@ class SddModelPanel implements OverlayComponent {
 			this.done({ type: "cancel" });
 			return;
 		}
+		if (this.profilePrompt === "save-name") {
+			this.handleProfileSaveNameInput(data);
+			return;
+		}
+		if (this.profilePrompt === "overwrite-confirm") {
+			this.handleProfileOverwriteConfirmInput(data);
+			return;
+		}
+		if (this.profilePrompt === "delete-confirm") {
+			this.handleProfileDeleteConfirmInput(data);
+			return;
+		}
+		this.handleProfilePickerInput(data);
+	}
+
+	private handleProfilePickerInput(data: string): void {
 		if (matchesKey(data, "escape") || matchesKey(data, "b")) {
 			this.mode = "agents";
 			return;
 		}
-		if (matchesKey(data, "s")) {
-			this.done({ type: "profile-save", config: this.draft });
+		if (matchesKey(data, "down") || matchesKey(data, "j")) {
+			if (this.profileNames.length === 0) return;
+			this.profileCursor = Math.min(
+				this.profileNames.length - 1,
+				this.profileCursor + 1,
+			);
 			return;
 		}
-		if (matchesKey(data, "l")) {
-			this.done({ type: "profile-load", config: this.draft });
+		if (matchesKey(data, "up") || matchesKey(data, "k")) {
+			if (this.profileNames.length === 0) return;
+			this.profileCursor = Math.max(0, this.profileCursor - 1);
+			return;
+		}
+		if (matchesKey(data, "g")) {
+			this.profileCursor = 0;
+			return;
+		}
+		if (data === "G") {
+			if (this.profileNames.length === 0) return;
+			this.profileCursor = this.profileNames.length - 1;
+			return;
+		}
+		if (matchesKey(data, "n")) {
+			this.profilePrompt = "save-name";
+			this.profileNameBuffer = "";
 			return;
 		}
 		if (matchesKey(data, "o")) {
-			this.done({ type: "profile-overwrite", config: this.draft });
+			if (this.profileNames.length === 0) return;
+			this.profilePrompt = "overwrite-confirm";
 			return;
 		}
 		if (matchesKey(data, "d")) {
-			this.done({ type: "profile-delete", config: this.draft });
+			if (this.profileNames.length === 0) return;
+			this.profilePrompt = "delete-confirm";
+			return;
+		}
+		if (matchesKey(data, "return")) {
+			if (this.profileNames.length === 0) return;
+			const filename = this.profileNames[this.profileCursor];
+			if (!filename) return;
+			this.done({ type: "profile-load", filename, config: this.draft });
+			return;
+		}
+	}
+
+	private handleProfileSaveNameInput(data: string): void {
+		if (matchesKey(data, "escape")) {
+			this.profilePrompt = "picker";
+			this.profileNameBuffer = "";
+			return;
+		}
+		if (matchesKey(data, "return")) {
+			const name = this.profileNameBuffer.trim();
+			if (name.length === 0) return;
+			this.done({ type: "profile-save", name, config: this.draft });
+			return;
+		}
+		if (data === "\u007f" || data === "\b") {
+			this.profileNameBuffer = this.profileNameBuffer.slice(0, -1);
+			return;
+		}
+		if (data.length === 1) {
+			const code = data.charCodeAt(0);
+			if (code >= 0x20 && code < 0x7f) {
+				this.profileNameBuffer += data;
+			}
+		}
+	}
+
+	private handleProfileOverwriteConfirmInput(data: string): void {
+		if (
+			matchesKey(data, "escape") ||
+			matchesKey(data, "b") ||
+			data === "n" ||
+			data === "N"
+		) {
+			this.profilePrompt = "picker";
+			return;
+		}
+		if (matchesKey(data, "return") || data === "y" || data === "Y") {
+			const filename = this.profileNames[this.profileCursor];
+			if (!filename) {
+				this.profilePrompt = "picker";
+				return;
+			}
+			this.done({
+				type: "profile-overwrite",
+				filename,
+				config: this.draft,
+			});
+			return;
+		}
+	}
+
+	private handleProfileDeleteConfirmInput(data: string): void {
+		if (
+			matchesKey(data, "escape") ||
+			matchesKey(data, "b") ||
+			data === "n" ||
+			data === "N"
+		) {
+			this.profilePrompt = "picker";
+			return;
+		}
+		if (matchesKey(data, "return") || data === "y" || data === "Y") {
+			const filename = this.profileNames[this.profileCursor];
+			if (!filename) {
+				this.profilePrompt = "picker";
+				return;
+			}
+			this.done({
+				type: "profile-delete",
+				filename,
+				config: this.draft,
+			});
+			return;
 		}
 	}
 
@@ -1559,28 +1689,92 @@ class SddModelPanel implements OverlayComponent {
 	}
 
 	private renderProfileMenu(width: number): string[] {
+		if (this.profilePrompt === "save-name") {
+			return this.renderProfileSaveNamePrompt(width);
+		}
+		if (this.profilePrompt === "overwrite-confirm") {
+			return this.renderProfileOverwriteConfirm(width);
+		}
+		if (this.profilePrompt === "delete-confirm") {
+			return this.renderProfileDeleteConfirm(width);
+		}
+		return this.renderProfilePicker(width);
+	}
+
+	private renderProfilePicker(width: number): string[] {
 		const line = (text = "") =>
 			truncateToWidth(text, Math.max(1, width), "…", true);
 		const profileCount = this.profileNames.length;
-		const visibleProfiles = this.profileNames.slice(0, 8);
-		const hiddenCount = profileCount - visibleProfiles.length;
-		return [
+		const lines: string[] = [
 			line("Model profiles"),
 			"",
 			line(`Available profiles:${profileCount > 0 ? ` ${profileCount}` : ""}`),
 			"",
-			...(visibleProfiles.length > 0
-				? visibleProfiles.map((name) => line(`  ${sanitizeTerminalText(name)}`))
-				: [line("  No profiles found")]),
-			...(hiddenCount > 0 ? [line(`  + ${hiddenCount} more`)] : []),
+		];
+		if (profileCount === 0) {
+			lines.push(line("  No profiles found"));
+			lines.push("");
+			lines.push(line("Press n to create a profile from current assignments"));
+			lines.push("");
+			lines.push(line("n new • esc back"));
+			return lines;
+		}
+		if (this.profileCursor < 0) this.profileCursor = 0;
+		if (this.profileCursor >= profileCount)
+			this.profileCursor = profileCount - 1;
+		for (let i = 0; i < profileCount; i++) {
+			const focused = i === this.profileCursor;
+			const name = sanitizeTerminalText(this.profileNames[i] ?? "");
+			lines.push(line(`${focused ? "▸" : " "} ${name}`));
+		}
+		lines.push("");
+		lines.push(
+			line(
+				"j/k scroll • enter load • n new • o overwrite • d delete • esc back",
+			),
+		);
+		return lines;
+	}
+
+	private renderProfileSaveNamePrompt(width: number): string[] {
+		const line = (text = "") =>
+			truncateToWidth(text, Math.max(1, width), "…", true);
+		return [
+			line("Save current assignments as new profile"),
 			"",
-			line("Actions:"),
-			line("  s  save current assignments as a new profile"),
-			line("  o  overwrite a profile with current assignments"),
-			line("  l  choose a profile to load"),
-			line("  d  choose a profile to delete"),
+			line(`Name: ${this.profileNameBuffer || "type a name..."}`),
 			"",
-			line("s/o/l/d choose action • esc back"),
+			line("enter save • esc cancel"),
+		];
+	}
+
+	private renderProfileOverwriteConfirm(width: number): string[] {
+		const line = (text = "") =>
+			truncateToWidth(text, Math.max(1, width), "…", true);
+		const filename = sanitizeTerminalText(
+			this.profileNames[this.profileCursor] ?? "",
+		);
+		return [
+			line(`Overwrite profile ${filename}?`),
+			"",
+			line("This replaces the selected profile with current assignments."),
+			"",
+			line("y/enter confirm • n/esc cancel"),
+		];
+	}
+
+	private renderProfileDeleteConfirm(width: number): string[] {
+		const line = (text = "") =>
+			truncateToWidth(text, Math.max(1, width), "…", true);
+		const filename = sanitizeTerminalText(
+			this.profileNames[this.profileCursor] ?? "",
+		);
+		return [
+			line(`Delete profile ${filename}?`),
+			"",
+			line("This removes the selected profile file."),
+			"",
+			line("y/enter confirm • n/esc cancel"),
 		];
 	}
 
@@ -1683,13 +1877,21 @@ class SddModelPanel implements OverlayComponent {
 async function showSddModelPanel(
 	ctx: ExtensionContext,
 	config: AgentModelConfig,
+	options: { initialMode?: "agents" | "profiles" } = {},
 ): Promise<ModelPanelResult> {
 	const modelOptions = await getPiModelOptions(ctx);
 	const agents = listDiscoverableAgents(ctx.cwd).map((agent) => agent.name);
 	const profileNames = (await listModelProfiles()).map((profile) => profile.filename);
 	return ctx.ui.custom<ModelPanelResult>(
 		(_tui, _theme, _keybindings, done) =>
-			new SddModelPanel(config, modelOptions, agents, profileNames, done),
+			new SddModelPanel(
+				config,
+				modelOptions,
+				agents,
+				profileNames,
+				options.initialMode ?? "agents",
+				done,
+			),
 		{
 			overlay: true,
 			overlayOptions: {
@@ -1770,134 +1972,126 @@ async function handleModelsCommand(ctx: ExtensionContext): Promise<void> {
 			continue;
 		}
 		if (result.type === "profile-save") {
-			const name = await ctx.ui.input(
-				"Save current assignments as profile",
-				"daily-routing",
-			);
-			if (name === undefined) return;
-			const filename = safeModelProfileFilename(name);
+			const filename = safeModelProfileFilename(result.name);
 			if (!filename) {
 				ctx.ui.notify(
 					"Model profile name must contain at least one letter or number.",
 					"warning",
 				);
-				result = await showSddModelPanel(ctx, config);
+				result = await showSddModelPanel(ctx, config, {
+					initialMode: "profiles",
+				});
 				continue;
 			}
 			const path = join(modelProfilesDir(), filename);
 			if (existsSync(path)) {
-				const approved = await ctx.ui.confirm(
-					"Overwrite model profile?",
-					`Replace ${path}`,
+				ctx.ui.notify(
+					`Model profile ${filename} already exists. Use overwrite from the picker to replace it.`,
+					"warning",
 				);
-				if (!approved) {
-					result = await showSddModelPanel(ctx, config);
-					continue;
-				}
+				result = await showSddModelPanel(ctx, config, {
+					initialMode: "profiles",
+				});
+				continue;
 			}
-			await writeModelProfile(name, result.config);
+			await writeModelProfile(result.name, result.config);
 			ctx.ui.notify(
 				`el Gentleman saved model profile ${filename} to ${path}.`,
 				"info",
 			);
-			result = await showSddModelPanel(ctx, config);
+			result = await showSddModelPanel(ctx, config, {
+				initialMode: "profiles",
+			});
 			continue;
 		}
 		if (result.type === "profile-load") {
+			const filename = result.filename;
 			const profiles = await listModelProfiles();
-			if (profiles.length === 0) {
-				ctx.ui.notify("No model profiles found.", "warning");
-				result = await showSddModelPanel(ctx, config);
+			const profile = profiles.find((entry) => entry.filename === filename);
+			if (!profile) {
+				ctx.ui.notify(
+					`Model profile ${result.filename} is missing.`,
+					"warning",
+				);
+				result = await showSddModelPanel(ctx, config, {
+					initialMode: "profiles",
+				});
 				continue;
 			}
-			const selected = await ctx.ui.select(
-				"Load model profile",
-				profiles.map((profile) => profile.filename),
-			);
-			const profile = profiles.find((entry) => entry.filename === selected);
-			if (!profile) return;
 			const loaded = await readModelProfile(profile.filename);
 			if (!loaded) {
 				ctx.ui.notify(
 					`Model profile ${profile.filename} is invalid and was not applied.`,
 					"warning",
 				);
-				result = await showSddModelPanel(ctx, config);
+				result = await showSddModelPanel(ctx, config, {
+					initialMode: "profiles",
+				});
 				continue;
 			}
-			const approved = await ctx.ui.confirm(
-				"Load model profile?",
-				`Replace ${modelConfigPath(ctx.cwd)} with ${profile.path}`,
+			await writeModelConfigAsync(ctx.cwd, loaded);
+			config = loaded;
+			const applyResult = await applyModelConfigAsync(ctx.cwd, loaded);
+			ctx.ui.notify(
+				[
+					"el Gentleman loaded model profile.",
+					`Profile: ${profile.path}`,
+					`Global config: ${modelConfigPath(ctx.cwd)}`,
+					`Agents updated: ${applyResult.updated}`,
+				].join("\n"),
+				"info",
 			);
-			if (approved) {
-				await writeModelConfigAsync(ctx.cwd, loaded);
-				config = loaded;
-				const applyResult = await applyModelConfigAsync(ctx.cwd, loaded);
-				ctx.ui.notify(
-					[
-						"el Gentleman loaded model profile.",
-						`Profile: ${profile.path}`,
-						`Global config: ${modelConfigPath(ctx.cwd)}`,
-						`Agents updated: ${applyResult.updated}`,
-					].join("\n"),
-					"info",
-				);
-			}
-			result = await showSddModelPanel(ctx, config);
+			result = await showSddModelPanel(ctx, config, {
+				initialMode: "profiles",
+			});
 			continue;
 		}
 		if (result.type === "profile-overwrite") {
+			const filename = result.filename;
 			const profiles = await listModelProfiles();
-			if (profiles.length === 0) {
-				ctx.ui.notify("No model profiles found.", "warning");
-				result = await showSddModelPanel(ctx, config);
+			const profile = profiles.find((entry) => entry.filename === filename);
+			if (!profile) {
+				ctx.ui.notify(
+					`Model profile ${result.filename} is missing.`,
+					"warning",
+				);
+				result = await showSddModelPanel(ctx, config, {
+					initialMode: "profiles",
+				});
 				continue;
 			}
-			const selected = await ctx.ui.select(
-				"Overwrite model profile",
-				profiles.map((profile) => profile.filename),
+			await writeModelProfileFile(profile.path, result.config);
+			ctx.ui.notify(
+				`el Gentleman overwrote model profile ${profile.filename}.`,
+				"info",
 			);
-			const profile = profiles.find((entry) => entry.filename === selected);
-			if (!profile) return;
-			const approved = await ctx.ui.confirm(
-				"Overwrite model profile?",
-				`Replace ${profile.path}`,
-			);
-			if (approved) {
-				await writeModelProfileFile(profile.path, result.config);
-				ctx.ui.notify(
-					`el Gentleman overwrote model profile ${profile.filename}.`,
-					"info",
-				);
-			}
-			result = await showSddModelPanel(ctx, config);
+			result = await showSddModelPanel(ctx, config, {
+				initialMode: "profiles",
+			});
 			continue;
 		}
 		if (result.type === "profile-delete") {
+			const filename = result.filename;
 			const profiles = await listModelProfiles();
-			if (profiles.length === 0) {
-				ctx.ui.notify("No model profiles found.", "warning");
-				result = await showSddModelPanel(ctx, config);
+			const profile = profiles.find((entry) => entry.filename === filename);
+			if (!profile) {
+				ctx.ui.notify(
+					`Model profile ${result.filename} is missing.`,
+					"warning",
+				);
+				result = await showSddModelPanel(ctx, config, {
+					initialMode: "profiles",
+				});
 				continue;
 			}
-			const selected = await ctx.ui.select(
-				"Delete model profile",
-				profiles.map((profile) => profile.filename),
+			await deleteModelProfile(profile.filename);
+			ctx.ui.notify(
+				`el Gentleman deleted model profile ${profile.filename}.`,
+				"info",
 			);
-			const profile = profiles.find((entry) => entry.filename === selected);
-			if (!profile) return;
-			const approved = await ctx.ui.confirm(
-				"Delete model profile?",
-				`Remove ${profile.path}`,
-			);
-			if (approved) {
-				await deleteModelProfile(profile.filename);
-				ctx.ui.notify(
-					`el Gentleman deleted model profile ${profile.filename}.`,
-					"info",
-				);
-			}
-			result = await showSddModelPanel(ctx, config);
+			result = await showSddModelPanel(ctx, config, {
+				initialMode: "profiles",
+			});
 			continue;
 		}
 		const current =

@@ -1036,7 +1036,7 @@ async function run() {
 
 		const ctx = createCtx(profilesCwd, true);
 		let phase = "save";
-		ctx.ui.input = async () => "Daily Routing / v2";
+		ctx.ui.input = async () => "Daily Baseline / v2";
 		ctx.ui.confirm = async () => true;
 		ctx.ui.custom = (factory) =>
 			new Promise((resolve) => {
@@ -1045,36 +1045,46 @@ async function run() {
 					phase = "cancel";
 					panel.handleInput("p");
 					assert.match(panel.render(100).join("\n"), /No profiles found/);
-					panel.handleInput("s");
+					assert.match(panel.render(100).join("\n"), /Press n to create a profile from current assignments/);
+					assert.doesNotMatch(panel.render(100).join("\n"),/\bactive\b|\bloaded\b/i);
+					panel.handleInput("n");
+					for (const ch of "Daily Baseline / v2") panel.handleInput(ch);
+					panel.handleInput("\r");
 					return;
 				}
 				if (phase === "load" || phase === "load-invalid") {
+					const currentPhase = phase;
 					phase = "cancel";
 					panel.handleInput("p");
-					assert.match(panel.render(100).join("\n"), /daily-routing-v2\.json|broken\.json/);
-					panel.handleInput("l");
+					assert.match(panel.render(100).join("\n"),/daily-baseline-v2\.json|broken\.json/);
+					assert.doesNotMatch(panel.render(100).join("\n"),/\bactive\b|\bloaded\b/i);
+					if (currentPhase !== "load-invalid") {
+						panel.handleInput("j");
+					}
+					panel.handleInput("\r");
 					return;
 				}
 				if (phase === "overwrite") {
 					phase = "cancel";
 					panel.handleInput("p");
 					panel.handleInput("o");
+					assert.match(panel.render(100).join("\n"), /overwrite/i);
+					panel.handleInput("\r");
 					return;
 				}
 				if (phase === "delete") {
 					phase = "cancel";
 					panel.handleInput("p");
+					panel.handleInput("j");
 					panel.handleInput("d");
+					assert.match(panel.render(100).join("\n"), /delete/i);
+					panel.handleInput("\r");
 					return;
 				}
 				panel.handleInput("\u001b");
 			});
 		await commands.get("gentle:models").handler("", ctx);
-		const savedProfilePath = join(
-			profileHome,
-			"model-profiles",
-			"daily-routing-v2.json",
-		);
+		const savedProfilePath = join(profileHome,"model-profiles","daily-baseline-v2.json");
 		const savedEnvelope = JSON.parse(await readFile(savedProfilePath, "utf8"));
 		assert.equal(savedEnvelope.kind, "gentle-pi.agent_model_routing");
 		assert.deepEqual(savedEnvelope.agents, {
@@ -1088,7 +1098,7 @@ async function run() {
 			JSON.stringify({}, null, 2),
 		);
 		ctx.ui.select = async (_label, options) =>
-			options.find((option) => option === "daily-routing-v2.json") ??
+			options.find((option) => option === "daily-baseline-v2.json") ??
 			options[0];
 		await commands.get("gentle:models").handler("", ctx);
 		assert.deepEqual(
@@ -1105,11 +1115,7 @@ async function run() {
 		phase = "overwrite";
 		await writeFile(
 			join(profileHome, "models.json"),
-			JSON.stringify(
-				{ "sdd-apply": { model: "overwrite/provider", thinking: "low" } },
-				null,
-				2,
-			),
+			JSON.stringify({ "sdd-apply": { model: "overwrite/provider", thinking: "low" } }, null, 2),
 		);
 		await commands.get("gentle:models").handler("", ctx);
 		const overwrittenProfile = JSON.parse(
@@ -1140,7 +1146,7 @@ async function run() {
 
 		phase = "delete";
 		ctx.ui.select = async (_label, options) =>
-			options.find((option) => option === "daily-routing-v2.json") ??
+			options.find((option) => option === "daily-baseline-v2.json") ??
 			options[0];
 		await commands.get("gentle:models").handler("", ctx);
 		assert.equal(existsSync(savedProfilePath), false);
