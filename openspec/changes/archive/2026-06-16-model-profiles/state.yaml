@@ -1,0 +1,19 @@
+change: model-profiles
+schema: spec-driven
+created: "2026-06-16"
+status: archived
+artifact_store: both
+phases:
+  proposal: complete
+  specs: complete
+  design: complete
+  tasks: complete
+  apply: complete
+  verify: complete
+  sync: complete
+  archive: complete
+notes:
+  - "Session SDD preflight: interactive execution, OpenSpec + Engram artifacts, ask-before-PR strategy, 400 changed-line review budget."
+  - "Existing x/r export and restore behavior for ~/.pi/gentle-ai/models.export.json is an explicit compatibility constraint."
+  - "Sync converted the initial flat spec into a domain-scoped model-routing spec before updating canonical OpenSpec specs."
+  - "Archive cleanup keeps the domain-scoped spec as the source of truth."

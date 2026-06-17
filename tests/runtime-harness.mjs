@@ -1016,6 +1016,201 @@ async function run() {
 		await rm(globalModelsPath, { force: true });
 	}
 
+	const gentleAiMod = await import(
+		`${pathToFileURL(join(ROOT, "extensions/gentle-ai.ts")).href}?runtime-harness=profiles-unit`
+	);
+	const profileTesting = gentleAiMod.__testing.modelProfiles;
+	assert.ok(profileTesting, "modelProfiles must be exported from __testing");
+
+	const profilesHome = await tempWorkspace();
+	process.env.GENTLE_PI_CONFIG_HOME = profilesHome;
+	const profilesDir = join(profilesHome, "model-profiles");
+	assert.equal(profileTesting.modelProfilesDir(), profilesDir);
+	assert.equal(
+		profileTesting.safeModelProfileFilename("Daily Routing / v2"),
+		"daily-routing-v2.json",
+	);
+	assert.equal(
+		profileTesting.safeModelProfileFilename("   ../escape"),
+		"escape.json",
+	);
+	assert.equal(profileTesting.safeModelProfileFilename("!!"), undefined);
+	assert.equal(
+		await profileTesting.readModelProfile("../escape.json"),
+		undefined,
+	);
+
+	const sampleProfile = {
+		"sdd-design": { model: "anthropic/claude-sonnet-4", thinking: "high" },
+	};
+	await profileTesting.writeModelProfile("daily-routing", sampleProfile);
+	await writeFile(join(profilesDir, "unsafe name.json"), "{}");
+	assert.deepEqual(
+		(await profileTesting.listModelProfiles()).map(
+			(profile) => profile.filename,
+		),
+		["daily-routing.json"],
+	);
+	assert.deepEqual(
+		await profileTesting.readModelProfile("daily-routing.json"),
+		sampleProfile,
+	);
+	await profileTesting.writeModelProfile("daily-routing", {
+		"sdd-design": { model: "anthropic/claude-sonnet-4", thinking: "low" },
+	});
+	const overwritten = JSON.parse(
+		await readFile(join(profilesDir, "daily-routing.json"), "utf8"),
+	);
+	assert.equal(overwritten.kind, "gentle-pi.agent_model_routing");
+	assert.equal(overwritten.version, 1);
+	assert.equal(overwritten.agents["sdd-design"].thinking, "low");
+	await writeFile(join(profilesDir, "broken.json"), "{ not valid json");
+	assert.equal(await profileTesting.readModelProfile("broken.json"), undefined);
+	await profileTesting.deleteModelProfile("../broken.json");
+	assert.equal(existsSync(join(profilesDir, "broken.json")), true);
+	await profileTesting.deleteModelProfile("daily-routing.json");
+	assert.equal(existsSync(join(profilesDir, "daily-routing.json")), false);
+	assert.equal(existsSync(join(profilesHome, "models.export.json")), false);
+	process.env.GENTLE_PI_CONFIG_HOME = globalConfigHome;
+
+	const profilesCwd = await tempWorkspace();
+	const profileHome = await tempWorkspace();
+	process.env.GENTLE_PI_CONFIG_HOME = profileHome;
+	try {
+		await mkdir(join(profilesCwd, ".pi", "agents"), { recursive: true });
+		await writeFile(
+			join(profilesCwd, ".pi", "agents", "sdd-apply.md"),
+			`---\nname: sdd-apply\ndescription: Apply phase\n---\n\nbody\n`,
+		);
+		await writeFile(
+			join(profileHome, "models.json"),
+			JSON.stringify(
+				{ "sdd-apply": { model: "openai/gpt-5", thinking: "high" } },
+				null,
+				2,
+			),
+		);
+
+		const ctx = createCtx(profilesCwd, true);
+		let phase = "save";
+		ctx.ui.input = async () => "Daily Routing / v2";
+		ctx.ui.confirm = async () => true;
+		ctx.ui.custom = (factory) =>
+			new Promise((resolve) => {
+				const panel = factory(null, null, null, resolve);
+				if (phase === "save") {
+					phase = "cancel";
+					panel.handleInput("p");
+					assert.match(panel.render(100).join("\n"), /No profiles found/);
+					panel.handleInput("s");
+					return;
+				}
+				if (phase === "load" || phase === "load-invalid") {
+					phase = "cancel";
+					panel.handleInput("p");
+					assert.match(panel.render(100).join("\n"), /daily-routing-v2\.json|broken\.json/);
+					panel.handleInput("l");
+					return;
+				}
+				if (phase === "overwrite") {
+					phase = "cancel";
+					panel.handleInput("p");
+					panel.handleInput("o");
+					return;
+				}
+				if (phase === "delete") {
+					phase = "cancel";
+					panel.handleInput("p");
+					panel.handleInput("d");
+					return;
+				}
+				panel.handleInput("\u001b");
+			});
+		await commands.get("gentle:models").handler("", ctx);
+		const savedProfilePath = join(
+			profileHome,
+			"model-profiles",
+			"daily-routing-v2.json",
+		);
+		const savedEnvelope = JSON.parse(await readFile(savedProfilePath, "utf8"));
+		assert.equal(savedEnvelope.kind, "gentle-pi.agent_model_routing");
+		assert.deepEqual(savedEnvelope.agents, {
+			"sdd-apply": { model: "openai/gpt-5", thinking: "high" },
+		});
+		assert.equal(existsSync(join(profileHome, "models.export.json")), false);
+
+		phase = "load";
+		await writeFile(
+			join(profileHome, "models.json"),
+			JSON.stringify({}, null, 2),
+		);
+		ctx.ui.select = async (_label, options) =>
+			options.find((option) => option === "daily-routing-v2.json") ??
+			options[0];
+		await commands.get("gentle:models").handler("", ctx);
+		assert.deepEqual(
+			JSON.parse(await readFile(join(profileHome, "models.json"), "utf8")),
+			{ "sdd-apply": { model: "openai/gpt-5", thinking: "high" } },
+		);
+		const loadedAgent = await readFile(
+			join(profilesCwd, ".pi", "agents", "sdd-apply.md"),
+			"utf8",
+		);
+		assert.match(loadedAgent, /model: openai\/gpt-5/);
+		assert.match(loadedAgent, /thinking: high/);
+
+		phase = "overwrite";
+		await writeFile(
+			join(profileHome, "models.json"),
+			JSON.stringify(
+				{ "sdd-apply": { model: "overwrite/provider", thinking: "low" } },
+				null,
+				2,
+			),
+		);
+		await commands.get("gentle:models").handler("", ctx);
+		const overwrittenProfile = JSON.parse(
+			await readFile(savedProfilePath, "utf8"),
+		);
+		assert.deepEqual(overwrittenProfile.agents, {
+			"sdd-apply": { model: "overwrite/provider", thinking: "low" },
+		});
+		assert.equal(existsSync(join(profileHome, "models.export.json")), false);
+
+		await writeFile(
+			join(profileHome, "model-profiles", "broken.json"),
+			"{ not valid json",
+		);
+		await writeFile(
+			join(profileHome, "models.json"),
+			JSON.stringify({}, null, 2),
+		);
+		phase = "load-invalid";
+		ctx.ui.select = async (_label, options) =>
+			options.find((option) => option === "broken.json") ?? options[0];
+		await commands.get("gentle:models").handler("", ctx);
+		assert.deepEqual(
+			JSON.parse(await readFile(join(profileHome, "models.json"), "utf8")),
+			{},
+		);
+		assert.match(ctx.ui.notifications.at(-1).message, /invalid/i);
+
+		phase = "delete";
+		ctx.ui.select = async (_label, options) =>
+			options.find((option) => option === "daily-routing-v2.json") ??
+			options[0];
+		await commands.get("gentle:models").handler("", ctx);
+		assert.equal(existsSync(savedProfilePath), false);
+		assert.equal(
+			existsSync(join(profileHome, "model-profiles", "broken.json")),
+			true,
+		);
+	} finally {
+		await rm(profilesCwd, { recursive: true, force: true });
+		await rm(profileHome, { recursive: true, force: true });
+		process.env.GENTLE_PI_CONFIG_HOME = globalConfigHome;
+	}
+
 	const registryCwd = await tempWorkspace();
 	try {
 		const ctx = createCtx(registryCwd, true);

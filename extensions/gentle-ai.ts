@@ -11,6 +11,7 @@ import {
 	mkdir,
 	readFile,
 	readdir,
+	unlink,
 	writeFile,
 } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -660,6 +661,90 @@ function modelExportPath(_cwd: string): string {
 const MODEL_EXPORT_KIND = "gentle-pi.agent_model_routing";
 const MODEL_EXPORT_VERSION = 1;
 
+function modelProfilesDir(_cwd?: string): string {
+	return join(gentleAiConfigHome(), "model-profiles");
+}
+
+const MODEL_PROFILE_FILENAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
+const MAX_MODEL_PROFILE_FILENAME_LENGTH = 64;
+
+function safeModelProfileFilename(name: string): string | undefined {
+	const trimmed = name.trim();
+	if (trimmed.length === 0) return undefined;
+	const segments = trimmed
+		.toLowerCase()
+		.split(/[\\/]+/)
+		.map((segment) =>
+			segment.replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, ""),
+		)
+		.filter((segment) => segment.length > 0);
+	if (segments.length === 0) return undefined;
+	const basename = segments
+		.join("-")
+		.slice(0, MAX_MODEL_PROFILE_FILENAME_LENGTH);
+	if (!MODEL_PROFILE_FILENAME_PATTERN.test(basename)) return undefined;
+	return `${basename}.json`;
+}
+
+function isSafeModelProfileFilename(filename: string): boolean {
+	if (!filename.endsWith(".json")) return false;
+	return MODEL_PROFILE_FILENAME_PATTERN.test(filename.slice(0, -5));
+}
+
+interface ModelProfileEntry { filename: string; path: string; }
+
+async function listModelProfiles(): Promise<ModelProfileEntry[]> {
+	const dir = modelProfilesDir();
+	if (!existsSync(dir)) return [];
+	const entries = await readdir(dir, { withFileTypes: true });
+	const profiles: ModelProfileEntry[] = [];
+	for (const entry of entries) {
+		if (!entry.isFile() || !isSafeModelProfileFilename(entry.name)) continue;
+		profiles.push({ filename: entry.name, path: join(dir, entry.name) });
+	}
+	profiles.sort((left, right) => left.filename.localeCompare(right.filename));
+	return profiles;
+}
+
+function buildModelProfileEnvelope(agents: AgentModelConfig): string {
+	const cleaned = normalizeModelConfig(agents) ?? {};
+	return JSON.stringify(
+		{ kind: MODEL_EXPORT_KIND, version: MODEL_EXPORT_VERSION, agents: cleaned },
+		null,
+		2,
+	);
+}
+
+async function writeModelProfileFile(path: string, agents: AgentModelConfig): Promise<void> {
+	await mkdir(dirname(path), { recursive: true });
+	await writeFile(path, `${buildModelProfileEnvelope(agents)}\n`);
+}
+
+async function writeModelProfile(name: string,agents: AgentModelConfig): Promise<string> {
+	const filename = safeModelProfileFilename(name);
+	if (!filename) throw new Error(`Invalid profile name: ${name}`);
+	const path = join(modelProfilesDir(), filename);
+	await writeModelProfileFile(path, agents);
+	return path;
+}
+
+async function readModelProfile(filename: string): Promise<AgentModelConfig | undefined> {
+	if (!isSafeModelProfileFilename(filename)) return undefined;
+	const path = join(modelProfilesDir(), filename);
+	if (!existsSync(path)) return undefined;
+	try {
+		return parseModelExport(JSON.parse(await readFile(path, "utf8")));
+	} catch {
+		return undefined;
+	}
+}
+
+async function deleteModelProfile(filename: string): Promise<void> {
+	if (!isSafeModelProfileFilename(filename)) return;
+	const path = join(modelProfilesDir(), filename);
+	if (existsSync(path)) await unlink(path);
+}
+
 function legacyProjectModelConfigPath(cwd: string): string {
 	return join(cwd, ".pi", "gentle-ai", "models.json");
 }
@@ -1230,6 +1315,10 @@ interface OverlayComponent {
 type ModelPanelResult =
 	| { type: "save"; config: AgentModelConfig }
 	| { type: "custom"; agent: string | "all"; config: AgentModelConfig }
+	| { type: "profile-save"; config: AgentModelConfig }
+	| { type: "profile-load"; config: AgentModelConfig }
+	| { type: "profile-overwrite"; config: AgentModelConfig }
+	| { type: "profile-delete"; config: AgentModelConfig }
 	| { type: "export"; config: AgentModelConfig }
 	| { type: "restore"; config: AgentModelConfig }
 	| { type: "cancel" };
@@ -1238,7 +1327,7 @@ const SET_ALL_AGENTS = "Set all agents";
 
 class SddModelPanel implements OverlayComponent {
 	private cursor = 0;
-	private mode: "agents" | "models" | "effort" = "agents";
+	private mode: "agents" | "models" | "effort" | "profiles" = "agents";
 	private selectedRow = SET_ALL_AGENTS;
 	private modelCursor = 0;
 	private effortCursor = 0;
@@ -1246,17 +1335,20 @@ class SddModelPanel implements OverlayComponent {
 	private readonly draft: AgentModelConfig;
 	private readonly rows: string[];
 	private readonly modelOptions: string[];
+	private readonly profileNames: string[];
 	private readonly done: (result: ModelPanelResult) => void;
 
 	constructor(
 		initialConfig: AgentModelConfig,
 		modelOptions: string[],
 		agents: string[],
+		profileNames: string[],
 		done: (result: ModelPanelResult) => void,
 	) {
 		this.draft = cloneModelConfig(initialConfig);
 		this.rows = [SET_ALL_AGENTS, ...agents];
 		this.modelOptions = modelOptions;
+		this.profileNames = profileNames;
 		this.done = done;
 	}
 
@@ -1271,6 +1363,10 @@ class SddModelPanel implements OverlayComponent {
 			this.handleEffortInput(data);
 			return;
 		}
+		if (this.mode === "profiles") {
+			this.handleProfileInput(data);
+			return;
+		}
 		this.handleAgentInput(data);
 	}
 
@@ -1281,7 +1377,9 @@ class SddModelPanel implements OverlayComponent {
 				? this.renderModelPicker(innerWidth)
 				: this.mode === "effort"
 					? this.renderEffortPicker(innerWidth)
-					: this.renderAgentList(innerWidth);
+					: this.mode === "profiles"
+						? this.renderProfileMenu(innerWidth)
+						: this.renderAgentList(innerWidth);
 		return this.renderCard(lines, width);
 	}
 
@@ -1338,6 +1436,10 @@ class SddModelPanel implements OverlayComponent {
 		}
 		if (matchesKey(data, "r")) {
 			this.done({ type: "restore", config: this.draft });
+			return;
+		}
+		if (matchesKey(data, "p")) {
+			this.mode = "profiles";
 			return;
 		}
 		if (matchesKey(data, "c")) {
@@ -1476,6 +1578,32 @@ class SddModelPanel implements OverlayComponent {
 		);
 	}
 
+	private handleProfileInput(data: string): void {
+		if (matchesKey(data, "ctrl+c")) {
+			this.done({ type: "cancel" });
+			return;
+		}
+		if (matchesKey(data, "escape") || matchesKey(data, "b")) {
+			this.mode = "agents";
+			return;
+		}
+		if (matchesKey(data, "s")) {
+			this.done({ type: "profile-save", config: this.draft });
+			return;
+		}
+		if (matchesKey(data, "l")) {
+			this.done({ type: "profile-load", config: this.draft });
+			return;
+		}
+		if (matchesKey(data, "o")) {
+			this.done({ type: "profile-overwrite", config: this.draft });
+			return;
+		}
+		if (matchesKey(data, "d")) {
+			this.done({ type: "profile-delete", config: this.draft });
+		}
+	}
+
 	private renderAgentList(width: number): string[] {
 		const lines: string[] = [];
 		const line = (text = "") =>
@@ -1516,10 +1644,36 @@ class SddModelPanel implements OverlayComponent {
 		lines.push("");
 		lines.push(
 			line(
-				"j/k scroll • enter model/save • e effort • i inherit • c custom • x export • r restore • ctrl+s save • esc back",
+				"j/k scroll • enter model/save • e effort • i inherit • c custom • p profiles • x export • r restore • ctrl+s save • esc back",
 			),
 		);
 		return lines;
+	}
+
+	private renderProfileMenu(width: number): string[] {
+		const line = (text = "") =>
+			truncateToWidth(text, Math.max(1, width), "…", true);
+		const profileCount = this.profileNames.length;
+		const visibleProfiles = this.profileNames.slice(0, 8);
+		const hiddenCount = profileCount - visibleProfiles.length;
+		return [
+			line("Model profiles"),
+			"",
+			line(`Available profiles:${profileCount > 0 ? ` ${profileCount}` : ""}`),
+			"",
+			...(visibleProfiles.length > 0
+				? visibleProfiles.map((name) => line(`  ${sanitizeTerminalText(name)}`))
+				: [line("  No profiles found")]),
+			...(hiddenCount > 0 ? [line(`  + ${hiddenCount} more`)] : []),
+			"",
+			line("Actions:"),
+			line("  s  save current assignments as a new profile"),
+			line("  o  overwrite a profile with current assignments"),
+			line("  l  choose a profile to load"),
+			line("  d  choose a profile to delete"),
+			"",
+			line("s/o/l/d choose action • esc back"),
+		];
 	}
 
 	private renderModelPicker(width: number): string[] {
@@ -1624,9 +1778,10 @@ async function showSddModelPanel(
 ): Promise<ModelPanelResult> {
 	const modelOptions = await getPiModelOptions(ctx);
 	const agents = listDiscoverableAgents(ctx.cwd).map((agent) => agent.name);
+	const profileNames = (await listModelProfiles()).map((profile) => profile.filename);
 	return ctx.ui.custom<ModelPanelResult>(
 		(_tui, _theme, _keybindings, done) =>
-			new SddModelPanel(config, modelOptions, agents, done),
+			new SddModelPanel(config, modelOptions, agents, profileNames, done),
 		{
 			overlay: true,
 			overlayOptions: {
@@ -1650,7 +1805,15 @@ async function handleModelsCommand(ctx: ExtensionContext): Promise<void> {
 	}
 	let config = savedConfig.status === "valid" ? savedConfig.config : {};
 	let result = await showSddModelPanel(ctx, config);
-	while (result.type === "custom" || result.type === "export" || result.type === "restore") {
+	while (
+		result.type === "custom" ||
+		result.type === "export" ||
+		result.type === "restore" ||
+		result.type === "profile-save" ||
+		result.type === "profile-load" ||
+		result.type === "profile-overwrite" ||
+		result.type === "profile-delete"
+	) {
 		config = cloneModelConfig(result.config);
 		if (result.type === "export") {
 			try {
@@ -1694,6 +1857,137 @@ async function handleModelsCommand(ctx: ExtensionContext): Promise<void> {
 						`Apply error: ${error instanceof Error ? error.message : String(error)}`,
 					].join("\n"), "warning");
 				}
+			}
+			result = await showSddModelPanel(ctx, config);
+			continue;
+		}
+		if (result.type === "profile-save") {
+			const name = await ctx.ui.input(
+				"Save current assignments as profile",
+				"daily-routing",
+			);
+			if (name === undefined) return;
+			const filename = safeModelProfileFilename(name);
+			if (!filename) {
+				ctx.ui.notify(
+					"Model profile name must contain at least one letter or number.",
+					"warning",
+				);
+				result = await showSddModelPanel(ctx, config);
+				continue;
+			}
+			const path = join(modelProfilesDir(), filename);
+			if (existsSync(path)) {
+				const approved = await ctx.ui.confirm(
+					"Overwrite model profile?",
+					`Replace ${path}`,
+				);
+				if (!approved) {
+					result = await showSddModelPanel(ctx, config);
+					continue;
+				}
+			}
+			await writeModelProfile(name, result.config);
+			ctx.ui.notify(
+				`el Gentleman saved model profile ${filename} to ${path}.`,
+				"info",
+			);
+			result = await showSddModelPanel(ctx, config);
+			continue;
+		}
+		if (result.type === "profile-load") {
+			const profiles = await listModelProfiles();
+			if (profiles.length === 0) {
+				ctx.ui.notify("No model profiles found.", "warning");
+				result = await showSddModelPanel(ctx, config);
+				continue;
+			}
+			const selected = await ctx.ui.select(
+				"Load model profile",
+				profiles.map((profile) => profile.filename),
+			);
+			const profile = profiles.find((entry) => entry.filename === selected);
+			if (!profile) return;
+			const loaded = await readModelProfile(profile.filename);
+			if (!loaded) {
+				ctx.ui.notify(
+					`Model profile ${profile.filename} is invalid and was not applied.`,
+					"warning",
+				);
+				result = await showSddModelPanel(ctx, config);
+				continue;
+			}
+			const approved = await ctx.ui.confirm(
+				"Load model profile?",
+				`Replace ${modelConfigPath(ctx.cwd)} with ${profile.path}`,
+			);
+			if (approved) {
+				await writeModelConfigAsync(ctx.cwd, loaded);
+				config = loaded;
+				const applyResult = await applyModelConfigAsync(ctx.cwd, loaded);
+				ctx.ui.notify(
+					[
+						"el Gentleman loaded model profile.",
+						`Profile: ${profile.path}`,
+						`Global config: ${modelConfigPath(ctx.cwd)}`,
+						`Agents updated: ${applyResult.updated}`,
+					].join("\n"),
+					"info",
+				);
+			}
+			result = await showSddModelPanel(ctx, config);
+			continue;
+		}
+		if (result.type === "profile-overwrite") {
+			const profiles = await listModelProfiles();
+			if (profiles.length === 0) {
+				ctx.ui.notify("No model profiles found.", "warning");
+				result = await showSddModelPanel(ctx, config);
+				continue;
+			}
+			const selected = await ctx.ui.select(
+				"Overwrite model profile",
+				profiles.map((profile) => profile.filename),
+			);
+			const profile = profiles.find((entry) => entry.filename === selected);
+			if (!profile) return;
+			const approved = await ctx.ui.confirm(
+				"Overwrite model profile?",
+				`Replace ${profile.path}`,
+			);
+			if (approved) {
+				await writeModelProfileFile(profile.path, result.config);
+				ctx.ui.notify(
+					`el Gentleman overwrote model profile ${profile.filename}.`,
+					"info",
+				);
+			}
+			result = await showSddModelPanel(ctx, config);
+			continue;
+		}
+		if (result.type === "profile-delete") {
+			const profiles = await listModelProfiles();
+			if (profiles.length === 0) {
+				ctx.ui.notify("No model profiles found.", "warning");
+				result = await showSddModelPanel(ctx, config);
+				continue;
+			}
+			const selected = await ctx.ui.select(
+				"Delete model profile",
+				profiles.map((profile) => profile.filename),
+			);
+			const profile = profiles.find((entry) => entry.filename === selected);
+			if (!profile) return;
+			const approved = await ctx.ui.confirm(
+				"Delete model profile?",
+				`Remove ${profile.path}`,
+			);
+			if (approved) {
+				await deleteModelProfile(profile.filename);
+				ctx.ui.notify(
+					`el Gentleman deleted model profile ${profile.filename}.`,
+					"info",
+				);
 			}
 			result = await showSddModelPanel(ctx, config);
 			continue;
@@ -1918,6 +2212,14 @@ export const __testing = {
 	buildGentlePrompt,
 	classifyReviewEvent,
 	parseNumstat,
+	modelProfiles: {
+		modelProfilesDir,
+		safeModelProfileFilename,
+		listModelProfiles,
+		writeModelProfile,
+		readModelProfile,
+		deleteModelProfile,
+	},
 };
 
 export default function gentleAi(pi: ExtensionAPI): void {

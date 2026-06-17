@@ -368,6 +368,8 @@ Existing project-local `.pi/gentle-ai/models.json` files are still read as a leg
 
 Inside `/gentle:models`, press `x` to export the saved routing to `~/.pi/gentle-ai/models.export.json`, or `r` to restore from that file after confirmation. Export uses a versioned envelope and restore writes the normal `models.json` shape before applying routing to agents.
 
+Press `p` to manage named model profiles. Profiles are JSON files under `~/.pi/gentle-ai/model-profiles/` with filesystem-safe filenames. Saving or overwriting a profile writes the same versioned export envelope used by `x`/`r`; loading a profile validates that envelope before applying it. Invalid profile contents are rejected with a warning and do not change the active model routing config. Profile actions do not create, rewrite, or delete `~/.pi/gentle-ai/models.export.json`.
+
 Config shape (per agent):
 
 ```json
