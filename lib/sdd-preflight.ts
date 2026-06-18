@@ -3,6 +3,9 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { SddArtifactStore } from "./sdd-status.ts";
+
+export type { SddArtifactStore };
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const ASSETS_DIR = join(PACKAGE_ROOT, "assets");
@@ -12,7 +15,6 @@ function gentlePiAgentHome(): string {
 }
 
 export type SddExecutionMode = "interactive" | "auto";
-export type SddArtifactStore = "openspec" | "engram" | "both";
 export type SddChainedPrStrategy =
 	| "auto-forecast"
 	| "ask-always"
@@ -64,6 +66,60 @@ const sddPreflightInFlight = new Map<string, Promise<SddPreflightPreferences>>()
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// ---------------------------------------------------------------------------
+// Durable store — survives restarts, resumed sessions, and non-SDD agent starts
+// ---------------------------------------------------------------------------
+
+export function sddPreflightDiskPath(cwd: string): string {
+	return join(cwd, ".pi", "gentle-ai", "sdd-preflight.json");
+}
+
+export function readSddPreflightFromDisk(cwd: string): SddPreflightPreferences | undefined {
+	const path = sddPreflightDiskPath(cwd);
+	if (!existsSync(path)) return undefined;
+	try {
+		const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+		if (!isRecord(parsed)) return undefined;
+		// Validate required fields to guard against stale/corrupt writes
+		const { executionMode, artifactStore, chainedPrStrategy, reviewBudgetLines, engramAvailable, prompted } = parsed;
+		if (
+			(executionMode !== "interactive" && executionMode !== "auto") ||
+			(artifactStore !== "openspec" && artifactStore !== "engram" && artifactStore !== "both" && artifactStore !== "none") ||
+			typeof reviewBudgetLines !== "number" ||
+			typeof engramAvailable !== "boolean" ||
+			typeof prompted !== "boolean"
+		) {
+			return undefined;
+		}
+		const normalizedChain: SddChainedPrStrategy =
+			chainedPrStrategy === "ask-always" ||
+			chainedPrStrategy === "single-pr-default" ||
+			chainedPrStrategy === "force-chained"
+				? (chainedPrStrategy as SddChainedPrStrategy)
+				: "auto-forecast";
+		return {
+			executionMode,
+			artifactStore,
+			chainedPrStrategy: normalizedChain,
+			reviewBudgetLines,
+			engramAvailable,
+			prompted,
+		};
+	} catch {
+		return undefined;
+	}
+}
+
+export function writeSddPreflightToDisk(cwd: string, prefs: SddPreflightPreferences): void {
+	try {
+		const path = sddPreflightDiskPath(cwd);
+		mkdirSync(dirname(path), { recursive: true });
+		writeFileSync(path, JSON.stringify(prefs, null, 2));
+	} catch {
+		// Disk write failures are non-fatal; in-memory cache is the primary store
+	}
 }
 
 function copyDirectoryFiles(
@@ -295,6 +351,7 @@ export async function ensureSddPreflight(
 			);
 		}
 		sddPreflightBySession.set(sessionKey, prefs);
+		writeSddPreflightToDisk(ctx.cwd, prefs);
 		return prefs;
 	})();
 	sddPreflightInFlight.set(sessionKey, promise);
@@ -308,5 +365,14 @@ export async function ensureSddPreflight(
 export function getSddPreflightPreferences(
 	ctx: ExtensionContext,
 ): SddPreflightPreferences | undefined {
-	return sddPreflightBySession.get(sddPreflightSessionKey(ctx));
+	const sessionKey = sddPreflightSessionKey(ctx);
+	const cached = sddPreflightBySession.get(sessionKey);
+	if (cached) return cached;
+	// Cache miss: check the durable disk store (survives restarts and non-SDD agent starts)
+	const persisted = readSddPreflightFromDisk(ctx.cwd);
+	if (persisted) {
+		sddPreflightBySession.set(sessionKey, persisted);
+		return persisted;
+	}
+	return undefined;
 }

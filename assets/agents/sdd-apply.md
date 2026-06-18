@@ -34,11 +34,15 @@ Never claim persistence you did not perform.
 
 Before writing code, consume structured SDD status from the parent prompt. If missing, produce the same fields using this lookup order: project override `.pi/gentle-ai/support/sdd-status-contract.md`, then globally installed `~/.pi/agent/gentle-ai/support/sdd-status-contract.md`, then the embedded status contract. Do not use `assets/support/...` as a runtime path; that is only the package source path before installation.
 
+**Non-authoritative store carve-out:** when the native status JSON shows `nextRecommended: "resolve-via-engram"` (covers `artifactStore: engram`, `artifactStore: none`, and `artifactStore: both` without an `openspec/` directory), the status is non-authoritative. Do not treat `applyState`, `dependencies`, or `blockedReasons` from that status as real blockers. Resolve readiness as follows:
+- `engram` (or `both` without openspec/): search Engram for `sdd/{change}/tasks`, `sdd/{change}/spec`, and `sdd/{change}/design` using `mem_search` + `mem_get_observation`. Proceed with implementation once those artifacts are confirmed present.
+- `none`: there is no persistent backend. Return artifacts inline and ask the user to provide required inputs (tasks, spec, design) or acknowledge that no persistent artifact store is available.
+
 Stop with `blocked` before editing if:
 
 - active change selection is missing or ambiguous;
-- `applyState: blocked`;
-- required apply artifacts are missing;
+- `applyState: blocked` **and the status is authoritative** (openspec or both store);
+- required apply artifacts are missing (confirmed by artifact store);
 - `actionContext.mode: workspace-planning` and no `allowedEditRoots` are provided;
 - any target file is outside the authoritative workspace or allowed edit roots.
 

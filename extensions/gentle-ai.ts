@@ -1982,6 +1982,7 @@ export default function gentleAi(pi: ExtensionAPI): void {
 			? `\n\n${renderNativeSddPhasePrompt(resolveSddStatus({
 				cwd: ctx.cwd,
 				includeInstructions: true,
+				artifactStore: prefs?.artifactStore,
 			}), phase)}`
 			: "";
 		const gentlePrompt = isNamedAgent || isSddAgent
@@ -2040,6 +2041,7 @@ export default function gentleAi(pi: ExtensionAPI): void {
 			cwd: ctx.cwd,
 			changeName: parsed.changeName,
 			includeInstructions: true,
+			artifactStore: getSddPreflightPreferences(ctx)?.artifactStore,
 		});
 		ctx.ui.notify(
 			parsed.json ? JSON.stringify(status, null, 2) : renderSddStatusMarkdown(status),
@@ -2067,6 +2069,7 @@ export default function gentleAi(pi: ExtensionAPI): void {
 			cwd: ctx.cwd,
 			changeName: parsed.changeName,
 			includeInstructions: true,
+			artifactStore: getSddPreflightPreferences(ctx)?.artifactStore,
 		});
 		ctx.ui.notify(
 			parsed.json ? JSON.stringify(status, null, 2) : renderSddDispatcherMarkdown(status),

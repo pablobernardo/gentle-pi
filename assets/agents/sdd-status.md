@@ -98,6 +98,8 @@ If parent context reports `workspace-planning` and no `allowedEditRoots`, mark a
 - `sync` is `ready` when verify-report exists and has no unresolved `FAIL`, `BLOCKED`, `CRITICAL`, or verification blockers; it is `not_applicable` for `engram`/`none` modes.
 - `archive` is `ready` only when verify-report is passing, sync-report exists or sync is not applicable, and no unchecked implementation tasks remain. CRITICAL verification issues have no override. Explicit recorded exceptions are limited to non-critical partial archives or stale-checkbox reconciliation when apply-progress/verify-report prove completion.
 
+**Non-authoritative carve-out:** when `nextRecommended: "resolve-via-engram"` or `isNonAuthoritative: true` is set on the status object, the `dependencies`, `applyState`, and `blockedReasons` fields are non-authoritative — they must not be treated as real blockers. This condition applies when the artifact store is `engram`, `none`, or `both` without an `openspec/` directory present on disk. For `engram`/`both-without-openspec`, resolve readiness directly from Engram using `mem_search` + `mem_get_observation` on the change topic keys (`sdd/{change}/proposal`, `sdd/{change}/spec`, `sdd/{change}/design`, `sdd/{change}/tasks`, etc.). For `none`, return inline status or ask the user — do not use the engine's `not_applicable`/`blockedReasons` as real gate failures.
+
 ## Output
 
 Return the standard phase envelope with status, executive_summary, artifacts, next_recommended, risks, and skill_resolution. Include the structured status block in `artifacts` or `executive_summary`.

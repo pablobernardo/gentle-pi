@@ -6,10 +6,10 @@ import {
 	type DomainCollision,
 } from "./openspec-guardrails.ts";
 
-export type SddArtifactStore = "openspec";
+export type SddArtifactStore = "openspec" | "engram" | "both" | "none";
 export type ArtifactState = "missing" | "done" | "partial";
 export type DependencyState = "blocked" | "ready" | "all_done" | "not_applicable";
-export type ApplyState = "blocked" | "ready" | "all_done";
+export type ApplyState = "blocked" | "ready" | "all_done" | "not_applicable";
 export type SddPhase = "apply" | "verify" | "sync" | "archive";
 
 export interface SddArtifactPaths {
@@ -76,6 +76,14 @@ export interface SddStatus {
 	nextRecommended: string;
 	instructions?: SddPhaseInstructions;
 	blockedReasons: string[];
+	/**
+	 * True when the native status engine is not authoritative for the selected
+	 * artifact store (engram, none, or both without an openspec/ directory).
+	 * When true, `dependencies`, `applyState`, and `blockedReasons` must not be
+	 * treated as real blockers — resolve readiness from Engram instead.
+	 * Defaults to false on all authoritative (openspec / both-with-disk) paths.
+	 */
+	isNonAuthoritative: boolean;
 }
 
 export interface ResolveSddStatusOptions {
@@ -83,6 +91,7 @@ export interface ResolveSddStatusOptions {
 	changeName?: string;
 	includeInstructions?: boolean;
 	workspaceRoot?: string;
+	artifactStore?: SddArtifactStore;
 }
 
 const EMPTY_PATHS: SddArtifactPaths = {
@@ -187,7 +196,7 @@ function reportIsClearlyPassing(path: string | undefined): boolean {
 	return hasPassSignal && !hasBlocker;
 }
 
-function emptyStatus(cwd: string, changeName: string | null, blockedReasons: string[]): SddStatus {
+function emptyStatus(cwd: string, changeName: string | null, blockedReasons: string[], artifactStore: SddArtifactStore = "openspec", isNonAuthoritative = false): SddStatus {
 	const root = resolve(cwd);
 	const changesDir = join(root, "openspec", "changes");
 	const actionContext: SddActionContext = {
@@ -200,7 +209,7 @@ function emptyStatus(cwd: string, changeName: string | null, blockedReasons: str
 		schemaName: "gentle-pi.sdd-status",
 		schemaVersion: 1,
 		changeName,
-		artifactStore: "openspec",
+		artifactStore,
 		planningHome: { root, changesDir },
 		changeRoot: null,
 		artifactPaths: { ...EMPTY_PATHS },
@@ -228,6 +237,7 @@ function emptyStatus(cwd: string, changeName: string | null, blockedReasons: str
 		collisions: [],
 		nextRecommended: blockedReasons[0] ?? "Start an SDD change.",
 		blockedReasons,
+		isNonAuthoritative,
 	};
 }
 
@@ -239,6 +249,14 @@ export function listActiveOpenSpecChanges(cwd: string): string[] {
 
 export function renderPhaseInstructions(status: SddStatus): SddPhaseInstructions {
 	const change = status.changeName ?? "<unresolved>";
+	if (status.applyState === "not_applicable") {
+		return {
+			apply: ["Readiness is resolved from Engram; per-phase instructions not applicable."],
+			verify: ["Readiness is resolved from Engram; per-phase instructions not applicable."],
+			sync: ["Readiness is resolved from Engram; per-phase instructions not applicable."],
+			archive: ["Readiness is resolved from Engram; per-phase instructions not applicable."],
+		};
+	}
 	return {
 		apply: [
 			`Change: ${change}`,
@@ -280,7 +298,75 @@ export function renderPhaseInstructions(status: SddStatus): SddPhaseInstructions
 	};
 }
 
+/**
+ * Build the single canonical non-authoritative SddStatus.
+ * All non-authoritative return sites must call this instead of constructing by hand.
+ */
+function nonAuthoritativeStatus(cwd: string, changeName: string | null, store: SddArtifactStore, includeInstructions?: boolean): SddStatus {
+	const root = resolve(cwd);
+	const actionContext: SddActionContext = {
+		mode: "repo-local",
+		workspaceRoot: root,
+		allowedEditRoots: [root],
+		warnings: [],
+	};
+	const status: SddStatus = {
+		schemaName: "gentle-pi.sdd-status",
+		schemaVersion: 1,
+		changeName,
+		artifactStore: store,
+		planningHome: { root, changesDir: "" },
+		changeRoot: null,
+		artifactPaths: { ...EMPTY_PATHS },
+		contextFiles: { ...EMPTY_PATHS },
+		artifacts: {
+			proposal: "missing",
+			specs: "missing",
+			design: "missing",
+			tasks: "missing",
+			applyProgress: "missing",
+			verifyReport: "missing",
+			syncReport: "missing",
+		},
+		taskProgress: { total: 0, complete: 0, remaining: 0, unchecked: [] },
+		applyState: "not_applicable",
+		dependencies: { apply: "not_applicable", verify: "not_applicable", sync: "not_applicable", archive: "not_applicable" },
+		actionContext,
+		relationships: {
+			dependsOn: [],
+			supersedes: [],
+			amends: [],
+			conflictsWith: [],
+			sameDomainActiveChanges: [],
+		},
+		collisions: [],
+		nextRecommended: "resolve-via-engram",
+		blockedReasons: [],
+		isNonAuthoritative: true,
+	};
+	if (includeInstructions) status.instructions = renderPhaseInstructions(status);
+	return status;
+}
+
 export function resolveSddStatus(options: ResolveSddStatusOptions): SddStatus {
+	// Safety net: when the store is unknown (undefined) and there is no openspec/ directory
+	// on disk, don't emit the openspec "no changes / blocked" status — it would be a false
+	// block for an engram or none session that hasn't been identified yet. Treat it as
+	// non-authoritative instead. A genuine openspec session will have the directory.
+	const hasOpenSpecDir = existsSync(join(resolve(options.cwd), "openspec"));
+	const store: SddArtifactStore =
+		options.artifactStore ?? (hasOpenSpecDir ? "openspec" : "none");
+
+	// Single decision point: non-authoritative when the disk engine cannot resolve authoritatively.
+	// Cases:
+	//   - store engram or none: always non-authoritative (no disk backing)
+	//   - store both, no openspec/ dir: non-authoritative (no disk to scan)
+	// The both-with-openspec cases are handled below after listing active changes.
+	if (store === "engram" || store === "none" || (store === "both" && !hasOpenSpecDir)) {
+		const changeName = options.changeName?.trim() || null;
+		return nonAuthoritativeStatus(options.cwd, changeName, store, options.includeInstructions);
+	}
+
 	const root = resolve(options.cwd);
 	const changesDir = join(root, "openspec", "changes");
 	const activeChanges = listActiveOpenSpecChanges(root);
@@ -291,16 +377,30 @@ export function resolveSddStatus(options: ResolveSddStatusOptions): SddStatus {
 		if (activeChanges.length === 1) {
 			changeName = activeChanges[0];
 		} else if (activeChanges.length === 0) {
-			return emptyStatus(root, null, ["No active SDD changes found."]);
+			// store both + openspec/ present + zero active changes + no changeName:
+			// The change may live only in Engram — non-authoritative, not a false block.
+			// Pure openspec with zero changes is a real block (run sdd-new).
+			if (store === "both") {
+				return nonAuthoritativeStatus(options.cwd, null, store, options.includeInstructions);
+			}
+			return emptyStatus(root, null, ["No active SDD changes found."], store);
 		} else {
+			// Multiple active changes and no changeName: legit selection prompt (changes DO exist
+			// on disk). Keep the existing authoritative ambiguous-selection behavior for both stores.
 			return emptyStatus(root, null, [
 				`Change selection is ambiguous: ${activeChanges.join(", ")}.`,
-			]);
+			], store);
 		}
 	}
 
 	if (!activeChanges.includes(changeName)) {
-		return emptyStatus(root, changeName, [`Active change not found: ${changeName}.`]);
+		// store both + openspec/ present + named change NOT found on disk:
+		// The change may live only in Engram — non-authoritative.
+		// Pure openspec still blocks (legit "run sdd-new").
+		if (store === "both") {
+			return nonAuthoritativeStatus(options.cwd, changeName, store, options.includeInstructions);
+		}
+		return emptyStatus(root, changeName, [`Active change not found: ${changeName}.`], store);
 	}
 
 	const changeRoot = join(changesDir, changeName);
@@ -405,7 +505,7 @@ export function resolveSddStatus(options: ResolveSddStatusOptions): SddStatus {
 		schemaName: "gentle-pi.sdd-status",
 		schemaVersion: 1,
 		changeName,
-		artifactStore: "openspec",
+		artifactStore: store,
 		planningHome: { root, changesDir },
 		changeRoot,
 		artifactPaths,
@@ -428,17 +528,29 @@ export function resolveSddStatus(options: ResolveSddStatusOptions): SddStatus {
 			: undefined,
 		nextRecommended,
 		blockedReasons,
+		isNonAuthoritative: false,
 	};
 	if (options.includeInstructions) status.instructions = renderPhaseInstructions(status);
 	return status;
 }
 
+export function isNonAuthoritativeStatus(status: SddStatus): boolean {
+	return status.isNonAuthoritative;
+}
+
 export function renderNativeSddPhasePrompt(status: SddStatus, phase?: SddPhase): string {
 	const selectedInstructions = phase ? status.instructions?.[phase] : undefined;
+	const isNonAuthoritative = isNonAuthoritativeStatus(status);
+	const authorityLine = isNonAuthoritative
+		? `This status is non-authoritative (artifact store: ${status.artifactStore}). The orchestrator must resolve readiness from Engram instead.`
+		: "The parent/orchestrator resolved this status deterministically. Treat it as authoritative over prompt inference.";
+	const blockLine = isNonAuthoritative
+		? `Do not block phase work based on this status — resolve readiness from Engram using mem_search + mem_get_observation on the change topic keys (sdd/{change}/proposal, sdd/{change}/spec, sdd/{change}/design, sdd/{change}/tasks, etc.) instead.`
+		: "Do not run phase work when this status marks the phase blocked; return the blockers instead.";
 	return [
 		"## Native SDD Status Engine",
-		"The parent/orchestrator resolved this status deterministically. Treat it as authoritative over prompt inference.",
-		"Do not run phase work when this status marks the phase blocked; return the blockers instead.",
+		authorityLine,
+		blockLine,
 		...(phase && selectedInstructions
 			? ["", `### ${phase} instructions`, ...selectedInstructions.map((line) => `- ${line}`)]
 			: []),
@@ -450,6 +562,29 @@ export function renderNativeSddPhasePrompt(status: SddStatus, phase?: SddPhase):
 }
 
 export function renderSddDispatcherMarkdown(status: SddStatus): string {
+	const isNonAuthoritative = isNonAuthoritativeStatus(status);
+	const statusSection = isNonAuthoritative
+		? [
+				"### Non-authoritative store — resolve via Engram",
+				`This status is non-authoritative (artifact store: ${status.artifactStore}).`,
+				"Resolve readiness directly from Engram using mem_search + mem_get_observation on the change topic keys:",
+				`- sdd/${status.changeName ?? "<change>"}/proposal`,
+				`- sdd/${status.changeName ?? "<change>"}/spec`,
+				`- sdd/${status.changeName ?? "<change>"}/design`,
+				`- sdd/${status.changeName ?? "<change>"}/tasks`,
+				`- sdd/${status.changeName ?? "<change>"}/apply-progress (if present)`,
+				`- sdd/${status.changeName ?? "<change>"}/verify-report (if present)`,
+				"Do not treat blockedReasons or dependency states from this status as real blockers.",
+			].join("\n")
+		: status.blockedReasons.length > 0
+			? ["### Blocked", ...status.blockedReasons.map((reason) => `- ${reason}`)].join("\n")
+			: "### Ready\nThe next phase may be delegated with the attached status JSON and phase instructions.";
+	// For non-authoritative status, skip the unsafe SddPhase cast on nextRecommended
+	const instructionsSection = isNonAuthoritative
+		? []
+		: (status.instructions?.[status.nextRecommended.replace(/^sdd-/, "") as SddPhase] ?? []).map(
+				(line) => `- ${line}`,
+			);
 	return [
 		`## Native SDD Dispatcher: ${status.changeName ?? "unresolved"}`,
 		"",
@@ -459,14 +594,11 @@ export function renderSddDispatcherMarkdown(status: SddStatus): string {
 		`sync: ${status.dependencies.sync}`,
 		`archive: ${status.dependencies.archive}`,
 		"",
-		status.blockedReasons.length > 0
-			? ["### Blocked", ...status.blockedReasons.map((reason) => `- ${reason}`)].join("\n")
-			: "### Ready\nThe next phase may be delegated with the attached status JSON and phase instructions.",
+		statusSection,
 		"",
-		"### Instructions for next phase",
-		...((status.instructions?.[status.nextRecommended.replace(/^sdd-/, "") as SddPhase] ?? [])
-			.map((line) => `- ${line}`)),
-		"",
+		...(instructionsSection.length > 0
+			? ["### Instructions for next phase", ...instructionsSection, ""]
+			: []),
 		"### Status JSON",
 		"```json",
 		JSON.stringify(status, null, 2),
@@ -515,6 +647,8 @@ export function parseSddStatusCommandArgs(args: string): { changeName?: string; 
 }
 
 export function sddStatusSeverity(status: SddStatus): "info" | "warning" {
+	// Non-authoritative status has no real blockers — always info
+	if (isNonAuthoritativeStatus(status)) return "info";
 	return status.blockedReasons.length > 0 || Object.values(status.dependencies).includes("blocked")
 		? "warning"
 		: "info";
