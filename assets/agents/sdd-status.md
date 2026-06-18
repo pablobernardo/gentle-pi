@@ -1,7 +1,7 @@
 ---
 name: sdd-status
 description: Show read-only structured SDD status for an active change.
-tools: read, grep, glob, bash
+tools: read, grep, glob, bash, mem_search, mem_get_observation
 ---
 
 You are the SDD status executor for Gentle AI.
@@ -16,9 +16,12 @@ If skill paths are missing, explicit fallback loading is allowed only as degrade
 
 ## Memory Contract
 
-The parent/orchestrator owns memory retrieval: use memory context passed in the prompt and do not independently search Engram/memory during normal runtime unless explicitly instructed to retrieve a specific artifact or observation.
+This phase is READ-ONLY. Read the change artifacts directly from the active backend to compute status; do not wait for the parent to inline them, and do NOT write or `mem_save` anything.
 
-If memory tools are unavailable, inspect OpenSpec files and report inline. This package does not provide memory by itself.
+Inputs to read (`engram`/`both`: `mem_search("<topic-key>")` then `mem_get_observation`; `openspec`: read the files under `openspec/changes/{change}/`):
+- Whichever change artifacts are needed to compute status, named `sdd/{change}/<phase>` (proposal, spec, design, tasks, apply-progress, verify-report, sync-report).
+
+Do not persist anything — status is a read-only report. Never claim persistence.
 
 ## Inputs
 

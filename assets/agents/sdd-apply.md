@@ -1,7 +1,7 @@
 ---
 name: sdd-apply
 description: Implement SDD tasks with strict TDD evidence and review workload guard.
-tools: read, grep, glob, edit, write, bash
+tools: read, grep, glob, edit, write, bash, mem_search, mem_get_observation, mem_save, mem_update
 ---
 
 You are the SDD apply executor for Gentle AI.
@@ -14,10 +14,21 @@ If skill paths are missing, explicit fallback loading is allowed only as degrade
 
 ## Memory Contract
 
-The parent/orchestrator owns memory retrieval: use memory context passed in the prompt and do not independently search Engram/memory during normal runtime unless explicitly instructed to retrieve a specific artifact or observation.
+Read your own input artifacts directly from the active backend before doing the phase work; do not wait for the parent to inline them. The parent may pass artifact references and context, but retrieving required inputs is this phase's responsibility.
 
-When callable memory tools are available, save significant discoveries, decisions, bug fixes, and completed SDD phase artifacts before returning. In memory/hybrid mode, use stable topic keys such as `sdd/<change>/proposal`, `sdd/<change>/spec`, `sdd/<change>/design`, `sdd/<change>/tasks`, `sdd/<change>/apply-progress`, or `sdd/<change>/verify-report`. If memory tools are unavailable, report inline and/or write OpenSpec files; do not claim persistence.
+Inputs to read (`engram`/`both`: `mem_search("<topic-key>")` then `mem_get_observation`; `openspec`: read the file under `openspec/changes/{change}/`):
+- Tasks (required): `sdd/{change}/tasks`
+- Spec (required): `sdd/{change}/spec`
+- Design (required): `sdd/{change}/design`
+- Previous apply-progress (if it exists): `sdd/{change}/apply-progress` — read and MERGE with your new progress; do NOT overwrite.
 
+Persist this phase's artifact to the active backend before returning (mandatory):
+- `engram`/`both`: call `mem_save` with title and `topic_key` `"sdd/{change}/apply-progress"`, `type: "architecture"`, `project` from context, and `capture_prompt: false` when the tool schema supports it (omit the field if an older schema rejects it).
+- Also update the tasks artifact checkboxes via `mem_update` (`engram`/`both`) or file edit (`openspec`).
+- `openspec`: write/update the apply-progress and tasks files under `openspec/changes/{change}/`.
+- `none`: return progress inline.
+
+Never claim persistence you did not perform.
 
 ## Status and Action Context Guard
 

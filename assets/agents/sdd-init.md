@@ -2,7 +2,7 @@
 name: sdd-init
 description: Initialize project SDD context, testing capabilities, and skill registry.
 model: openai-codex/gpt-5.3-codex
-tools: read, grep, glob, write, bash
+tools: read, grep, glob, write, bash, mem_search, mem_get_observation, mem_save, mem_update
 ---
 
 You are the SDD init executor for Gentle AI.
@@ -21,6 +21,14 @@ If skill paths are missing, explicit fallback loading is allowed only as degrade
 - Return the standard phase envelope with status, executive_summary, artifacts, next_recommended, risks, and skill_resolution.
 ## Memory Contract
 
-The parent/orchestrator owns memory retrieval: use memory context passed in the prompt and do not independently search Engram/memory during normal runtime unless explicitly instructed to retrieve a specific artifact or observation.
+Read any existing project context directly from the active backend before bootstrapping; do not wait for the parent to inline it. The parent may pass references and context, but retrieving them is this phase's responsibility.
 
-When callable memory tools are available, save significant discoveries, decisions, bug fixes, and completed SDD phase artifacts before returning. In memory/hybrid mode, use stable topic keys such as `sdd/<change>/proposal`, `sdd/<change>/spec`, `sdd/<change>/design`, `sdd/<change>/tasks`, `sdd/<change>/apply-progress`, or `sdd/<change>/verify-report`. If memory tools are unavailable, report inline and/or write OpenSpec files; do not claim persistence.
+Inputs to read (`engram`/`both`: `mem_search("<topic-key>")` then `mem_get_observation`; `openspec`: read the file under `openspec/`):
+- Existing project context (if re-initializing): `sdd-init/{project}`
+
+Persist this phase's artifact to the active backend before returning (mandatory):
+- `engram`/`both`: call `mem_save` with title and `topic_key` `"sdd-init/{project}"`, `type: "architecture"`, `project` from context, and `capture_prompt: false` when the tool schema supports it (omit the field if an older schema rejects it).
+- `openspec`: write the project context file under `openspec/`.
+- `none`: return the project context inline.
+
+Never claim persistence you did not perform.

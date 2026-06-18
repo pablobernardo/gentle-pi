@@ -263,12 +263,32 @@ This package does not provide persistent memory by itself.
 
 ## Memory Contract
 
-When Engram or another callable memory package is available, the parent owns memory retrieval and subagents own write-back for significant findings.
+When Engram or another callable memory package is available, the parent owns context selection and subagents own write-back. Retrieval rules differ by task type, matching the gentle-ai (OpenCode) contract.
 
-- Read context: parent/orchestrator searches memory, selects relevant observations, and passes them into subagent prompts. Subagents should not independently search memory during normal runtime unless the parent explicitly instructs them to retrieve a specific artifact or observation.
-- Write context: subagents MUST save significant discoveries, decisions, bug fixes, and completed SDD phase artifacts to memory before returning when memory tools are available.
+### Non-SDD delegation
+
+- Read context: the parent/orchestrator searches memory (`mem_search`), selects relevant observations, and passes them into the subagent prompt. The subagent does NOT search memory itself.
+- Write context: the subagent MUST save significant discoveries, decisions, or bug fixes via `mem_save` before returning when memory tools are available.
 - Prompt forwarding: when delegating, add a concrete instruction such as: `If you make important discoveries, decisions, or fix bugs, save them to Engram via the available memory save tool with project: '<project>' before returning.`
-- SDD artifact keys: in memory/hybrid mode, phase artifacts should use stable topic keys such as `sdd/<change>/proposal`, `sdd/<change>/spec`, `sdd/<change>/design`, `sdd/<change>/tasks`, `sdd/<change>/apply-progress`, and `sdd/<change>/verify-report`.
+
+### SDD phases
+
+Each SDD phase subagent reads its own required inputs directly from the active backend; the parent passes artifact references (topic keys or file paths), NOT the content itself. Phase subagents persist their artifact before returning.
+
+| Phase          | Reads                                                   | Writes           |
+| -------------- | ------------------------------------------------------- | ---------------- |
+| `sdd-explore`  | nothing                                                 | `explore`        |
+| `sdd-proposal` | exploration (optional)                                  | `proposal`       |
+| `sdd-spec`     | proposal (required)                                     | `spec`           |
+| `sdd-design`   | proposal (required)                                     | `design`         |
+| `sdd-tasks`    | spec + design (required)                                | `tasks`          |
+| `sdd-apply`    | tasks + spec + design + `apply-progress` (if it exists) | `apply-progress` |
+| `sdd-verify`   | spec + tasks + `apply-progress`                         | `verify-report`  |
+| `sdd-sync`     | proposal + spec + design + tasks + `verify-report`      | `sync-report`    |
+| `sdd-archive`  | all artifacts                                           | `archive-report` |
+| `sdd-status`   | change artifacts (read-only)                            | nothing          |
+
+- SDD artifact keys: in memory/hybrid mode, phase artifacts use stable topic keys such as `sdd/<change>/proposal`, `sdd/<change>/spec`, `sdd/<change>/design`, `sdd/<change>/tasks`, `sdd/<change>/apply-progress`, `sdd/<change>/verify-report`, `sdd/<change>/sync-report`, and `sdd/<change>/archive-report`.
 - If memory tools are unavailable, do not pretend persistence exists; return artifacts inline and/or write OpenSpec files.
 
 Memory lifecycle rule (when Engram exposes lifecycle metadata/tooling):

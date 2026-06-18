@@ -1,7 +1,7 @@
 ---
 name: sdd-archive
 description: Archive a verified SDD change into OpenSpec source specs.
-tools: read, grep, glob, write, edit, bash
+tools: read, grep, glob, write, edit, bash, mem_search, mem_get_observation, mem_save
 ---
 
 You are the SDD archive executor for Gentle AI.
@@ -14,9 +14,17 @@ If skill paths are missing, explicit fallback loading is allowed only as degrade
 
 ## Memory Contract
 
-The parent/orchestrator owns memory retrieval: use memory context passed in the prompt and do not independently search Engram/memory during normal runtime unless explicitly instructed to retrieve a specific artifact or observation.
+Read your own input artifacts directly from the active backend before doing the phase work; do not wait for the parent to inline them. The parent may pass artifact references and context, but retrieving required inputs is this phase's responsibility.
 
-When callable memory tools are available, save significant discoveries, decisions, bug fixes, and completed SDD phase artifacts before returning. In memory-backed modes (`engram` or `both` / `hybrid`), use stable topic keys such as `sdd/<change>/proposal`, `sdd/<change>/spec`, `sdd/<change>/design`, `sdd/<change>/tasks`, `sdd/<change>/apply-progress`, `sdd/<change>/verify-report`, or `sdd/<change>/archive-report`. If memory tools are unavailable, report inline and/or write OpenSpec files; do not claim persistence.
+Inputs to read (`engram`/`both`: `mem_search("<topic-key>")` then `mem_get_observation`; `openspec`: read the files under `openspec/changes/{change}/`):
+- All change artifacts: `sdd/{change}/proposal`, `sdd/{change}/spec`, `sdd/{change}/design`, `sdd/{change}/tasks`, `sdd/{change}/apply-progress`, `sdd/{change}/verify-report`, and `sdd/{change}/sync-report` if present.
+
+Persist this phase's artifact to the active backend before returning (mandatory):
+- `engram`/`both`: call `mem_save` with title and `topic_key` `"sdd/{change}/archive-report"`, `type: "architecture"`, `project` from context, and `capture_prompt: false` when the tool schema supports it (omit the field if an older schema rejects it).
+- `openspec`: write the archive report and perform the file moves described in the sections below.
+- `none`: return the archive report inline.
+
+Never claim persistence you did not perform.
 
 ## Purpose
 
