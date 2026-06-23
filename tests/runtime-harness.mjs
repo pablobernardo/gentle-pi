@@ -1011,6 +1011,59 @@ async function run() {
 		const restoredAgent = await readFile(join(modelsCwd, ".pi", "agents", "sdd-apply.md"), "utf8");
 		assert.match(restoredAgent, /model: restore\/provider/);
 		assert.match(restoredAgent, /thinking: high/);
+
+		let profileSaveCalls = 0;
+		ctx.ui.custom = () => {
+			profileSaveCalls += 1;
+			return Promise.resolve(profileSaveCalls === 1 ? {
+				type: "profile-save",
+				name: "Daily Profile",
+				config: { "sdd-apply": { model: "profile/provider", thinking: "low" } },
+			} : { type: "cancel" });
+		};
+		await commands.get("gentle:models").handler("", ctx);
+		const savedProfile = JSON.parse(await readFile(join(globalConfigHome, "model-profiles", "daily-profile.json"), "utf8"));
+		assert.equal(savedProfile.kind, "gentle-pi.agent_model_routing");
+		assert.deepEqual(savedProfile.agents["sdd-apply"], {
+			model: "profile/provider",
+			thinking: "low",
+		});
+
+		let profileLoadCalls = 0;
+		ctx.ui.confirm = async () => false;
+		ctx.ui.custom = () => {
+			profileLoadCalls += 1;
+			return Promise.resolve(profileLoadCalls === 1 ? { type: "profile-load", filename: "daily-profile.json", config: {} } : { type: "cancel" });
+		};
+		await commands.get("gentle:models").handler("", ctx);
+		const profileLoadCanceledConfig = JSON.parse(await readFile(globalModelsPath, "utf8"));
+		assert.deepEqual(profileLoadCanceledConfig["sdd-apply"], {
+			model: "restore/provider",
+			thinking: "high",
+		});
+
+		profileLoadCalls = 0;
+		ctx.ui.confirm = async () => true;
+		ctx.ui.custom = () => {
+			profileLoadCalls += 1;
+			return Promise.resolve(profileLoadCalls === 1 ? { type: "profile-load", filename: "daily-profile.json", config: {} } : { type: "cancel" });
+		};
+		await commands.get("gentle:models").handler("", ctx);
+		const profileLoadedConfig = JSON.parse(await readFile(globalModelsPath, "utf8"));
+		assert.deepEqual(profileLoadedConfig["sdd-apply"], {
+			model: "profile/provider",
+			thinking: "low",
+		});
+
+		await mkdir(join(globalConfigHome, "model-profiles", "delete-fails.json"), { recursive: true });
+		let profileDeleteCalls = 0;
+		ctx.ui.custom = () => {
+			profileDeleteCalls += 1;
+			return Promise.resolve(profileDeleteCalls === 1 ? { type: "profile-delete", filename: "delete-fails.json", config: {} } : { type: "cancel" });
+		};
+		await commands.get("gentle:models").handler("", ctx);
+		assert.equal(ctx.ui.notifications.at(-1).level, "warning");
+		assert.match(ctx.ui.notifications.at(-1).message, /Model profile delete failed:/);
 	} finally {
 		await rm(modelsCwd, { recursive: true, force: true });
 		await rm(globalModelsPath, { force: true });

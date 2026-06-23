@@ -45,6 +45,17 @@ import {
 	type ChangedDiff,
 	type TriggerEvent,
 } from "../lib/review-triggers.ts";
+import {
+	deleteModelProfile,
+	listModelProfiles,
+	overwriteModelProfile,
+	readModelProfile,
+	writeModelProfile,
+} from "../lib/model-profiles.ts";
+import {
+	ModelProfilePanel,
+	type ModelProfilePanelAction,
+} from "../lib/model-profile-panel.ts";
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const ASSETS_DIR = join(PACKAGE_ROOT, "assets");
@@ -1230,6 +1241,10 @@ interface OverlayComponent {
 type ModelPanelResult =
 	| { type: "save"; config: AgentModelConfig }
 	| { type: "custom"; agent: string | "all"; config: AgentModelConfig }
+	| { type: "profile-save"; name: string; config: AgentModelConfig }
+	| { type: "profile-load"; filename: string; config: AgentModelConfig }
+	| { type: "profile-overwrite"; filename: string; config: AgentModelConfig }
+	| { type: "profile-delete"; filename: string; config: AgentModelConfig }
 	| { type: "export"; config: AgentModelConfig }
 	| { type: "restore"; config: AgentModelConfig }
 	| { type: "cancel" };
@@ -1238,26 +1253,32 @@ const SET_ALL_AGENTS = "Set all agents";
 
 class SddModelPanel implements OverlayComponent {
 	private cursor = 0;
-	private mode: "agents" | "models" | "effort" = "agents";
+	private mode: "agents" | "models" | "effort" | "profiles" = "agents";
 	private selectedRow = SET_ALL_AGENTS;
 	private modelCursor = 0;
 	private effortCursor = 0;
 	private query = "";
+	private profilePanel: ModelProfilePanel | undefined;
 	private readonly draft: AgentModelConfig;
 	private readonly rows: string[];
 	private readonly modelOptions: string[];
+	private readonly profileNames: string[];
 	private readonly done: (result: ModelPanelResult) => void;
 
 	constructor(
 		initialConfig: AgentModelConfig,
 		modelOptions: string[],
 		agents: string[],
+		profileNames: string[],
+		initialMode: "agents" | "profiles",
 		done: (result: ModelPanelResult) => void,
 	) {
 		this.draft = cloneModelConfig(initialConfig);
 		this.rows = [SET_ALL_AGENTS, ...agents];
 		this.modelOptions = modelOptions;
+		this.profileNames = profileNames;
 		this.done = done;
+		if (initialMode === "profiles") this.openProfilePanel();
 	}
 
 	invalidate(): void {}
@@ -1271,17 +1292,23 @@ class SddModelPanel implements OverlayComponent {
 			this.handleEffortInput(data);
 			return;
 		}
+		if (this.mode === "profiles") {
+			this.profilePanel?.handleInput(data);
+			return;
+		}
 		this.handleAgentInput(data);
 	}
 
 	render(width: number): string[] {
 		const innerWidth = Math.max(1, width - 4);
 		const lines =
-			this.mode === "models"
-				? this.renderModelPicker(innerWidth)
-				: this.mode === "effort"
-					? this.renderEffortPicker(innerWidth)
-					: this.renderAgentList(innerWidth);
+			this.mode === "profiles"
+				? (this.profilePanel?.render() ?? [])
+				: this.mode === "models"
+					? this.renderModelPicker(innerWidth)
+					: this.mode === "effort"
+						? this.renderEffortPicker(innerWidth)
+						: this.renderAgentList(innerWidth);
 		return this.renderCard(lines, width);
 	}
 
@@ -1340,6 +1367,10 @@ class SddModelPanel implements OverlayComponent {
 			this.done({ type: "restore", config: this.draft });
 			return;
 		}
+		if (matchesKey(data, "p")) {
+			this.openProfilePanel();
+			return;
+		}
 		if (matchesKey(data, "c")) {
 			const row = this.rows[this.cursor];
 			if (row === SET_ALL_AGENTS)
@@ -1361,6 +1392,62 @@ class SddModelPanel implements OverlayComponent {
 		this.mode = "models";
 		this.modelCursor = 0;
 		this.query = "";
+	}
+
+	private openProfilePanel(): void {
+		this.profilePanel = new ModelProfilePanel(
+			{
+				profileNames: this.profileNames,
+				lineWidth: 72,
+				matchesKey: (data, key) =>
+					matchesKey(data, key as Parameters<typeof matchesKey>[1]),
+				sanitizeTerminalText,
+				truncateToWidth,
+			},
+			(action) => this.handleProfileAction(action),
+		);
+		this.mode = "profiles";
+	}
+
+	private handleProfileAction(action: ModelProfilePanelAction): void {
+		if (action.type === "back") {
+			this.profilePanel = undefined;
+			this.mode = "agents";
+			return;
+		}
+		if (action.type === "cancel") {
+			this.done({ type: "cancel" });
+			return;
+		}
+		if (action.type === "load") {
+			this.done({
+				type: "profile-load",
+				filename: action.filename,
+				config: this.draft,
+			});
+			return;
+		}
+		if (action.type === "save") {
+			this.done({
+				type: "profile-save",
+				name: action.name,
+				config: this.draft,
+			});
+			return;
+		}
+		if (action.type === "overwrite") {
+			this.done({
+				type: "profile-overwrite",
+				filename: action.filename,
+				config: this.draft,
+			});
+			return;
+		}
+		this.done({
+			type: "profile-delete",
+			filename: action.filename,
+			config: this.draft,
+		});
 	}
 
 	private handleModelInput(data: string): void {
@@ -1516,7 +1603,7 @@ class SddModelPanel implements OverlayComponent {
 		lines.push("");
 		lines.push(
 			line(
-				"j/k scroll • enter model/save • e effort • i inherit • c custom • x export • r restore • ctrl+s save • esc back",
+				"j/k scroll • enter model/save • e effort • i inherit • c custom • p profiles • x export • r restore • ctrl+s save • esc back",
 			),
 		);
 		return lines;
@@ -1621,12 +1708,22 @@ class SddModelPanel implements OverlayComponent {
 async function showSddModelPanel(
 	ctx: ExtensionContext,
 	config: AgentModelConfig,
+	options: { initialMode?: "agents" | "profiles" } = {},
 ): Promise<ModelPanelResult> {
 	const modelOptions = await getPiModelOptions(ctx);
 	const agents = listDiscoverableAgents(ctx.cwd).map((agent) => agent.name);
+	const profiles = await listModelProfiles();
+	const profileNames = profiles.map((profile) => profile.filename);
 	return ctx.ui.custom<ModelPanelResult>(
 		(_tui, _theme, _keybindings, done) =>
-			new SddModelPanel(config, modelOptions, agents, done),
+			new SddModelPanel(
+				config,
+				modelOptions,
+				agents,
+				profileNames,
+				options.initialMode ?? "agents",
+				done,
+			),
 		{
 			overlay: true,
 			overlayOptions: {
@@ -1650,8 +1747,102 @@ async function handleModelsCommand(ctx: ExtensionContext): Promise<void> {
 	}
 	let config = savedConfig.status === "valid" ? savedConfig.config : {};
 	let result = await showSddModelPanel(ctx, config);
-	while (result.type === "custom" || result.type === "export" || result.type === "restore") {
+	const showProfiles = () =>
+		showSddModelPanel(ctx, config, { initialMode: "profiles" });
+	while (
+		result.type === "custom" ||
+		result.type === "export" ||
+		result.type === "restore" ||
+		result.type === "profile-save" ||
+		result.type === "profile-load" ||
+		result.type === "profile-overwrite" ||
+		result.type === "profile-delete"
+	) {
 		config = cloneModelConfig(result.config);
+		if (result.type === "profile-save") {
+			try {
+				const path = await writeModelProfile(result.name, config);
+				ctx.ui.notify(`el Gentleman saved model profile: ${path}`, "info");
+			} catch (error) {
+				ctx.ui.notify(
+					`Model profile save failed: ${error instanceof Error ? error.message : String(error)}`,
+					"warning",
+				);
+			}
+			result = await showProfiles();
+			continue;
+		}
+		if (result.type === "profile-load") {
+			const loaded = await readModelProfile(result.filename);
+			if (!loaded) {
+				ctx.ui.notify(
+					`Model profile load failed: ${result.filename} is missing or invalid.`,
+					"warning",
+				);
+				result = await showProfiles();
+				continue;
+			}
+			const approved = await ctx.ui.confirm(
+				`Load model profile ${result.filename}?`,
+				`Replace ${modelConfigPath(ctx.cwd)} and update matching agents.`,
+			);
+			if (!approved) {
+				result = await showProfiles();
+				continue;
+			}
+			await writeModelConfigAsync(ctx.cwd, loaded);
+			config = loaded;
+			try {
+				const applyResult = await applyModelConfigAsync(ctx.cwd, loaded);
+				ctx.ui.notify(
+					[
+						`el Gentleman loaded model profile: ${result.filename}`,
+						`Global config: ${modelConfigPath(ctx.cwd)}`,
+						`Agents updated: ${applyResult.updated}`,
+					].join("\n"),
+					"info",
+				);
+			} catch (error) {
+				ctx.ui.notify(
+					`Model profile loaded, but applying it to agents failed: ${error instanceof Error ? error.message : String(error)}`,
+					"warning",
+				);
+			}
+			result = await showProfiles();
+			continue;
+		}
+		if (result.type === "profile-overwrite") {
+			try {
+				await overwriteModelProfile(result.filename, config);
+				ctx.ui.notify(
+					`el Gentleman overwrote model profile: ${result.filename}`,
+					"info",
+				);
+			} catch (error) {
+				ctx.ui.notify(
+					`Model profile overwrite failed: ${error instanceof Error ? error.message : String(error)}`,
+					"warning",
+				);
+			}
+			result = await showProfiles();
+			continue;
+		}
+		if (result.type === "profile-delete") {
+			try {
+				await deleteModelProfile(result.filename);
+				ctx.ui.notify(
+					`el Gentleman deleted model profile: ${result.filename}`,
+					"info",
+				);
+			} catch (error) {
+				ctx.ui.notify(
+					`Model profile delete failed: ${error instanceof Error ? error.message : String(error)}`,
+					"warning",
+				);
+			}
+			result = await showProfiles();
+			continue;
+		}
 		if (result.type === "export") {
 			try {
 				const count = await exportSavedModelConfig(ctx);
